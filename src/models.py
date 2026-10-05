@@ -42,6 +42,25 @@ class MenuInfo:
         return asdict(self)
 
 @dataclass
+class PricePartner:
+    partner: str = ""
+    price: str = ""
+    link: Optional[str] = None
+    note: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class PricingInfo:
+    main_price: Optional[str] = None
+    price_range: Optional[str] = None
+    partners: List[PricePartner] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
 class Place:
     title: str = ""
     place_id: Optional[str] = None
@@ -50,6 +69,7 @@ class Place:
     rating: Optional[float] = None
     reviews_count: Optional[int] = None
     price_range: Optional[str] = None
+    pricing: PricingInfo = field(default_factory=PricingInfo)
     address: Optional[str] = None
     phone: Optional[str] = None
     website: Optional[str] = None

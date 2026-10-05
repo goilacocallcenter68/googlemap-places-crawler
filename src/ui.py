@@ -37,7 +37,7 @@ def print_summary_table(places: List[Place], keyword: str):
     table.add_column("Tên địa điểm / Quán", style="bold white", width=24)
     table.add_column("Danh mục", style="green", width=15)
     table.add_column("⭐ Đánh giá", justify="center", style="yellow", width=12)
-    table.add_column("Khoảng giá", justify="center", style="bold yellow", width=15)
+    table.add_column("Khoảng giá", justify="center", style="bold yellow", width=18)
     table.add_column("Số ĐT", style="cyan", width=14)
     table.add_column("Địa chỉ", style="white", width=28)
     table.add_column("Reviews cào", justify="center", style="magenta", width=11)
@@ -47,7 +47,19 @@ def print_summary_table(places: List[Place], keyword: str):
 
     for i, p in enumerate(places, 1):
         rating_str = f"{p.rating:.1f} ({p.reviews_count or 0})" if p.rating else "N/A"
-        price_str = p.price_range or "N/A"
+
+        # Format price column
+        price_str = "N/A"
+        if p.pricing and (p.pricing.main_price or p.pricing.partners):
+            base_p = p.pricing.main_price or (p.pricing.partners[0].price if p.pricing.partners else "")
+            partner_cnt = len(p.pricing.partners)
+            if partner_cnt > 0:
+                price_str = f"{base_p} ({partner_cnt} ĐT)"
+            else:
+                price_str = base_p or "N/A"
+        elif p.price_range:
+            price_str = p.price_range
+
         addr = (p.address[:25] + "...") if p.address and len(p.address) > 28 else (p.address or "N/A")
         title = (p.title[:21] + "...") if len(p.title) > 24 else p.title
         phone = p.phone or "N/A"
@@ -99,6 +111,10 @@ def print_demo_json(places: List[Place]):
         demo_copy["_note"] = f"... và {len(places[0].reviews) - 2} đánh giá khác"
     if len(demo_copy.get("photos", [])) > 3:
         demo_copy["photos"] = demo_copy["photos"][:3] + [f"... còn {len(places[0].photos) - 3} ảnh nữa"]
+    if "pricing" in demo_copy and isinstance(demo_copy["pricing"], dict):
+        partners_list = demo_copy["pricing"].get("partners", [])
+        if len(partners_list) > 2:
+            demo_copy["pricing"]["partners"] = partners_list[:2] + [{"_note": f"... còn {len(partners_list) - 2} đối tác đặt phòng khác"}]
     if "menu" in demo_copy and isinstance(demo_copy["menu"], dict):
         dishes_list = demo_copy["menu"].get("dishes", [])
         if len(dishes_list) > 3:

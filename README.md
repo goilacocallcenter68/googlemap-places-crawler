@@ -126,8 +126,25 @@ Tùy chỉnh thư mục lưu kết quả:
     "category": "Quán cà phê",
     "description": "Quán cà phê phong cách hiện đại với không gian ngoài trời thoáng đãng...",
     "rating": 4.3,
-    "reviews_count": 1166,
-    "price_range": null,
+    "price_range": "394.911 ₫",
+    "pricing": {
+      "main_price": "394.911 ₫",
+      "price_range": null,
+      "partners": [
+        {
+          "partner": "HomeToGo",
+          "price": "394.911 ₫",
+          "link": "https://www.google.com/travel/lodging/clk?...",
+          "note": "Hủy đặt phòng miễn phí đến hết ngày 6 thg 10"
+        },
+        {
+          "partner": "Agoda",
+          "price": "397.568 ₫",
+          "link": "https://www.google.com/travel/lodging/clk?...",
+          "note": null
+        }
+      ]
+    },
     "address": "Số 6, Trần Cao Vân/Công trường Quốc Tế/42 Hồ Con Rùa, Quận 3, Hồ Chí Minh, Việt Nam",
     "phone": "+84 1900 3013",
     "website": "https://phela.vn/",

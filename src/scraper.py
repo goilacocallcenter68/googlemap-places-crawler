@@ -5,7 +5,7 @@ import urllib.parse
 from typing import List, Optional, Dict, Any, Callable, Tuple
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
-from src.models import Place, Review, Coordinates, MenuItem, MenuInfo
+from src.models import Place, Review, Coordinates, MenuItem, MenuInfo, PricingInfo, PricePartner
 
 SORT_OPTIONS = {
     "most_relevant": "Phù hợp nhất",
@@ -224,17 +224,46 @@ class GoogleMapsScraper:
 
             place_links: List[str] = []
             seen_links = set()
+            feed_price_map: Dict[str, str] = {}
             consecutive_no_change = 0
 
             while consecutive_no_change < 4:
-                # Find all place links in feed
-                links = await feed.query_selector_all('a[href*="/maps/place/"]')
+                # Find all place links and feed prices
+                card_items = await feed.evaluate(r'''() => {
+                    const results = [];
+                    const cards = document.querySelectorAll('div.Nv2PK');
+                    if (cards.length > 0) {
+                        for (const c of cards) {
+                            const a = c.querySelector('a[href*="/maps/place/"]');
+                            if (!a || !a.href) continue;
+                            let price = null;
+                            const els = c.querySelectorAll('span, div');
+                            for (const el of els) {
+                                const t = (el.innerText || '').trim();
+                                if (/^\d+([.,]\d+)?\s*(?:N|Tr|₫|đ|VND)$/i.test(t)) {
+                                    price = t;
+                                    break;
+                                }
+                            }
+                            results.push({ href: a.href, price });
+                        }
+                    } else {
+                        const links = document.querySelectorAll('a[href*="/maps/place/"]');
+                        for (const a of links) {
+                            if (a.href) results.push({ href: a.href, price: null });
+                        }
+                    }
+                    return results;
+                }''')
+
                 new_found = False
-                for link in links:
-                    href = await link.get_attribute("href")
+                for item in card_items:
+                    href = item.get("href")
                     if href and href not in seen_links:
                         seen_links.add(href)
                         place_links.append(href)
+                        if item.get("price"):
+                            feed_price_map[href] = item["price"]
                         new_found = True
                         if limit and len(place_links) >= limit:
                             break
@@ -314,7 +343,8 @@ class GoogleMapsScraper:
                             await place_page.goto(place_url, wait_until="domcontentloaded", timeout=25000)
                             await place_page.wait_for_timeout(1800)
                             await self._handle_consent(place_page)
-                            place = await self._extract_place_details(place_page, place_url, max_reviews=max_reviews, sort_by=sort_by)
+                            feed_p = feed_price_map.get(place_url)
+                            place = await self._extract_place_details(place_page, place_url, max_reviews=max_reviews, sort_by=sort_by, feed_price=feed_p)
                             if place:
                                 break
                         except Exception:
@@ -355,7 +385,8 @@ class GoogleMapsScraper:
         page: Page,
         place_url: str,
         max_reviews: Optional[int] = 100,
-        sort_by: str = "most_relevant"
+        sort_by: str = "most_relevant",
+        feed_price: Optional[str] = None
     ) -> Optional[Place]:
         """Extracts complete information for a single place."""
         place = Place(url=place_url)
@@ -389,9 +420,18 @@ class GoogleMapsScraper:
         category_el = await page.query_selector('button[jsaction*="category"]')
         if category_el:
             place.category = (await category_el.inner_text()).strip()
+        if not place.category:
+            # Check for hotel star class or category in mgr77e or F7nice
+            star_el = await page.query_selector('span.mgr77e, div.fontBodyMedium.dmRWX')
+            if star_el:
+                star_text = clean_text(await star_el.inner_text())
+                if star_text and any(k in star_text.lower() for k in ["khách sạn", "hotel", "resort", "nhà nghỉ", "homestay"]):
+                    star_text = re.sub(r'^[\d.,]+\s*\([\d.,]+\)[·•\s]*', '', star_text).strip()
+                    place.category = star_text
 
-        # Price range
-        place.price_range = await self._extract_price_range(page)
+        # Pricing & Price range
+        place.pricing = await self._extract_pricing(page, feed_price=feed_price)
+        place.price_range = place.pricing.price_range or place.pricing.main_price
 
         # Address
         addr_el = await page.query_selector(
@@ -608,8 +648,10 @@ class GoogleMapsScraper:
 
         return about_data
 
-    async def _extract_price_range(self, page: Page) -> Optional[str]:
-        """Extracts price range (e.g. 1.000.000 ₫ trở lên, 200.000–400.000 ₫, ₫₫, $$$) from Overview."""
+    async def _extract_pricing(self, page: Page, feed_price: Optional[str] = None) -> PricingInfo:
+        """Extracts comprehensive pricing info: main price, price range, and partner booking options (for hotels)."""
+        pricing = PricingInfo()
+
         def _clean_price_str(raw: Optional[str]) -> Optional[str]:
             if not raw:
                 return None
@@ -618,56 +660,187 @@ class GoogleMapsScraper:
             c = c.replace('\xa0', ' ')
             return c if c else None
 
-        # Retry up to 5 times (total ~2s) to allow Google Maps async XHR to populate price
-        for attempt in range(6):
+        def _is_valid_price_str(s: Optional[str]) -> bool:
+            if not s:
+                return False
+            s_clean = s.strip()
+            s_lower = s_clean.lower()
+            # Must not be category, accessibility, or other metadata phrases
+            invalid_phrases = ["khách sạn", "sao", "xe lăn", "lối vào", "mở cửa", "đóng cửa", "bình luận", "đánh giá"]
+            if any(inv in s_lower for inv in invalid_phrases):
+                return False
+            if any(sym in s_clean for sym in ['₫', '$', '€', '£', '¥', 'VND', 'vnd', '₫₫', '$$']):
+                return True
+            if any(term in s_lower for term in ['giá', 'price', 'trở lên']):
+                return True
+            if re.search(r'\d+([.,]\d+)?\s*(?:N|Tr)\b', s_clean):
+                return True
+            if re.search(r'\d+\s*[-–]\s*\d+', s_clean):
+                return True
+            return False
+
+        # 1. Extract Overview standard price range (for restaurants, cafes, services)
+        for attempt in range(4):
             try:
-                # 1. Inner span with role="img" inside span.mgr77e (contains detailed aria-label or price range)
+                # Inner span with role="img" inside span.mgr77e (contains detailed aria-label or price range)
                 img_span = await page.query_selector('span.mgr77e span[role="img"], div.F7nice ~ span.mgr77e span[role="img"]')
                 if img_span:
                     aria = await img_span.get_attribute("aria-label")
                     text = await img_span.inner_text()
                     val = aria or text
                     res = _clean_price_str(val)
-                    if res:
-                        return res
+                    if res and _is_valid_price_str(res):
+                        pricing.price_range = res
+                        break
 
-                # 2. Modern Google Maps price container: span.mgr77e
+                # Modern Google Maps price container: span.mgr77e
                 price_el = await page.query_selector('span.mgr77e')
                 if price_el:
                     aria = await price_el.get_attribute("aria-label")
                     text = await price_el.inner_text()
                     val = aria if (aria and ('₫' in aria or '$' in aria or 'giá' in aria.lower())) else text
                     res = _clean_price_str(val)
-                    if res:
-                        return res
+                    if res and _is_valid_price_str(res):
+                        pricing.price_range = res
+                        break
 
-                # 3. Sibling of rating / F7nice container
+                # Sibling of rating / F7nice container
                 f7_price = await page.query_selector('div.F7nice ~ span.mgr77e, div.fontBodyMedium.dmRWX span[role="img"]')
                 if f7_price:
                     aria = await f7_price.get_attribute("aria-label")
                     text = await f7_price.inner_text()
-                    val = aria or text
-                    res = _clean_price_str(val)
-                    if res and any(sym in res for sym in ['₫', '$', 'Giá', 'giá', 'trở lên', 'Tr']):
-                        return res
+                    res = _clean_price_str(aria or text)
+                    if res and _is_valid_price_str(res):
+                        pricing.price_range = res
+                        break
 
-                # 4. Fallback aria selectors
+                # Fallback aria selectors
                 fallback = await page.query_selector(
-                    'span[aria-label*="Giá:"], span[aria-label*="Mức giá"], span[aria-label*="Price:"], span[aria-label*="trở lên"]'
+                    'span[aria-label*="Giá:"], span[aria-label*="Mức giá"], span[aria-label*="Price:"]'
                 )
                 if fallback:
                     aria = await fallback.get_attribute("aria-label")
                     text = await fallback.inner_text()
                     res = _clean_price_str(aria or text)
-                    if res:
-                        return res
+                    if res and _is_valid_price_str(res):
+                        pricing.price_range = res
+                        break
             except Exception:
                 pass
 
-            if attempt < 5:
-                await page.wait_for_timeout(400)
+            if attempt < 3:
+                await page.wait_for_timeout(300)
 
-        return None
+        # 2. Extract Hotel main price badge on Overview (e.g. div.fontHeadlineSmall.HgKUEe, div.HgKUEe)
+        try:
+            hotel_badge = await page.query_selector('div.fontHeadlineSmall.HgKUEe, div.HgKUEe')
+            if hotel_badge:
+                badge_text = _clean_price_str(await hotel_badge.inner_text())
+                if badge_text and any(sym in badge_text for sym in ['₫', '$', 'VND', 'Tr', 'N']):
+                    pricing.main_price = badge_text
+        except Exception:
+            pass
+
+        # 3. Check for dedicated "Giá" / "Prices" tab (Hotels, Resorts, Lodging)
+        try:
+            price_tab = page.locator('button[role="tab"]').filter(has_text=re.compile(r'^(?:giá|prices?)$', re.I)).first
+            if await price_tab.count() > 0:
+                try:
+                    await price_tab.click(timeout=2000)
+                except Exception:
+                    await price_tab.evaluate("el => el.click()")
+
+                await page.wait_for_timeout(2000)
+
+                # Scroll scroller down once to allow partner list to render
+                try:
+                    await page.evaluate('''() => {
+                        const scroller = document.querySelector('div.m6QErb.DxyBCb, div.m6QErb[tabindex="-1"], div.dS8AEf');
+                        if (scroller) scroller.scrollTop += 1000;
+                    }''')
+                    await page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+                # Extract partners
+                raw_partners = await page.evaluate(r'''() => {
+                    const results = [];
+                    const links = document.querySelectorAll('a[href*="google.com/travel"]');
+                    for (const a of links) {
+                        const linkText = (a.innerText || '').trim();
+                        const href = a.href || '';
+                        if (!linkText) continue;
+
+                        const lines = linkText.split('\n').map(s => s.trim()).filter(Boolean);
+                        let partnerName = '';
+                        let price = '';
+                        let note = null;
+
+                        for (const line of lines) {
+                            if (/[\d.,]+\s*(?:₫|đ|VND|\$)/.test(line) && !price) {
+                                price = line.replace(/[\ue000-\uf8ff]/g, '').trim();
+                            } else if (!partnerName && !/[\ue000-\uf8ff]/.test(line) && line.length < 50) {
+                                partnerName = line;
+                            }
+                        }
+
+                        const parent = a.closest('div.b525Ud, tr, div[role="listitem"], div.Z1Xq1b, div.kJ7USe') || a.parentElement;
+                        if (parent) {
+                            const pText = parent.innerText || '';
+                            const noteMatches = pText.match(/(Hủy[^.\n]+|Bao gồm[^.\n]+|Miễn phí[^.\n]+)/i);
+                            if (noteMatches) {
+                                note = noteMatches[1].trim();
+                            }
+                        }
+
+                        if (partnerName && price) {
+                            results.push({
+                                partner: partnerName,
+                                price: price,
+                                link: href,
+                                note: note
+                            });
+                        }
+                    }
+                    return results;
+                }''')
+
+                seen_partners = set()
+                partners_list: List[PricePartner] = []
+                for p_dict in raw_partners:
+                    p_name = clean_text(p_dict.get("partner", ""))
+                    p_price = _clean_price_str(p_dict.get("price", ""))
+                    p_link = p_dict.get("link")
+                    p_note = clean_text(p_dict.get("note", "")) if p_dict.get("note") else None
+                    key = (p_name.lower(), p_price)
+                    if p_name and p_price and key not in seen_partners:
+                        seen_partners.add(key)
+                        partners_list.append(PricePartner(
+                            partner=p_name,
+                            price=p_price,
+                            link=p_link,
+                            note=p_note
+                        ))
+
+                pricing.partners = partners_list
+
+                # If main_price wasn't found from badge, use the first/cheapest partner price
+                if not pricing.main_price and partners_list:
+                    pricing.main_price = partners_list[0].price
+
+                # Ensure we switch back to Overview tab
+                await self._ensure_overview_tab(page)
+
+        except Exception:
+            pass
+
+        # 4. Fallback from feed_price if no price was extracted
+        if not pricing.main_price and not pricing.price_range and feed_price:
+            clean_feed = _clean_price_str(feed_price)
+            if clean_feed:
+                pricing.main_price = clean_feed
+
+        return pricing
 
     async def _extract_opening_hours(self, page: Page) -> Dict[str, str]:
         hours: Dict[str, str] = {}
