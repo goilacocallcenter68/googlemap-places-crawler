@@ -131,7 +131,20 @@ Tùy chỉnh thư mục lưu kết quả:
     "address": "Số 6, Trần Cao Vân/Công trường Quốc Tế/42 Hồ Con Rùa, Quận 3, Hồ Chí Minh, Việt Nam",
     "phone": "+84 1900 3013",
     "website": "https://phela.vn/",
-    "menu": "https://phela.vn/menu",
+    "menu": {
+      "link": "https://phela.vn/menu",
+      "dishes": [
+        {
+          "name": "Ô Long Sữa Phê La",
+          "price": "55.000 ₫",
+          "description": "Trà ô long đặc sản kết hợp sữa tươi béo ngậy",
+          "photo": "https://lh3.googleusercontent.com/...=s1600"
+        }
+      ],
+      "photos": [
+        "https://lh3.googleusercontent.com/...=s1600"
+      ]
+    },
     "booking_link": null,
     "plus_code": "QMHX+7C Quận 3, Hồ Chí Minh, Việt Nam",
     "opening_hours": {

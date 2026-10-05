@@ -5,7 +5,7 @@ import urllib.parse
 from typing import List, Optional, Dict, Any, Callable, Tuple
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
-from src.models import Place, Review, Coordinates
+from src.models import Place, Review, Coordinates, MenuItem, MenuInfo
 
 SORT_OPTIONS = {
     "most_relevant": "Phù hợp nhất",
@@ -434,11 +434,7 @@ class GoogleMapsScraper:
             place.plus_code = clean_text(await plus_code_el.inner_text())
 
         # Menu
-        menu_el = await page.query_selector(
-            'a[data-item-id*="menu"], a[aria-label*="Thực đơn"], a[aria-label*="Menu"], button[data-item-id*="menu"]'
-        )
-        if menu_el:
-            place.menu = await menu_el.get_attribute("href")
+        place.menu = await self._extract_menu(page)
 
         # Booking / Reservation / Order
         booking_el = await page.query_selector(
@@ -461,6 +457,12 @@ class GoogleMapsScraper:
 
         # Reviews
         place.reviews = await self._extract_reviews(page, max_reviews=max_reviews, sort_by=sort_by)
+
+        # Fallback: if dishes list is still empty, harvest topic/dish chips from active Reviews tab
+        if not place.menu.dishes:
+            extra_dishes = await self._extract_dishes_from_active_reviews(page)
+            if extra_dishes:
+                place.menu.dishes = extra_dishes
 
         return place
 
@@ -709,6 +711,467 @@ class GoogleMapsScraper:
         except Exception:
             pass
         return photos
+
+    async def _extract_menu(self, page: Page) -> MenuInfo:
+        """Extracts complete menu information including link, dishes, and menu photos."""
+        menu_info = MenuInfo()
+        try:
+            # 1. External menu link
+            menu_info.link = await self._extract_menu_link(page)
+
+            # 2. Extract dishes and photos directly from official Thực đơn / Menu tab
+            tab_dishes, tab_photos = await self._extract_from_menu_tab(page)
+            if tab_dishes:
+                menu_info.dishes = tab_dishes
+            if tab_photos:
+                menu_info.photos = tab_photos
+
+            # 3. Fallback: if no dishes from menu tab, check overview popular dishes & chips
+            if not menu_info.dishes:
+                menu_info.dishes = await self._extract_overview_popular_dishes(page)
+
+            # 4. Fallback for photos: if no photos from menu tab, check Photos tab
+            if not menu_info.photos:
+                menu_info.photos = await self._extract_menu_photos(page)
+
+            # Switch back to Overview tab so subsequent extractions (About, Reviews) run properly
+            await self._ensure_overview_tab(page)
+        except Exception:
+            pass
+
+        return menu_info
+
+    async def _extract_menu_link(self, page: Page) -> Optional[str]:
+        """Extracts external menu website / ordering URL if present."""
+        selectors = [
+            'a[data-item-id*="menu"]',
+            'a[aria-label*="Thực đơn"]',
+            'a[aria-label*="Menu"]',
+            'button[data-item-id*="menu"]',
+            'a[data-tooltip*="thực đơn"]',
+            'a[data-tooltip*="menu"]',
+            'a[data-item-id*="action:menu"]',
+        ]
+        for sel in selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    href = await el.get_attribute("href")
+                    if href:
+                        if "google.com/url?" in href:
+                            try:
+                                parsed = urllib.parse.urlparse(href)
+                                qs = urllib.parse.parse_qs(parsed.query)
+                                if "q" in qs:
+                                    href = qs["q"][0]
+                            except Exception:
+                                pass
+                        return href.strip()
+            except Exception:
+                pass
+
+        # Fallback: look for any link element with text "Thực đơn" or "Menu" in overview
+        try:
+            links = await page.evaluate(r'''() => {
+                const results = [];
+                document.querySelectorAll('a').forEach(a => {
+                    const text = (a.innerText || a.getAttribute('aria-label') || '').trim();
+                    const href = a.getAttribute('href');
+                    if (href && (/^thực đơn$/i.test(text) || /^menu$/i.test(text))) {
+                        results.push(href);
+                    }
+                });
+                return results;
+            }''')
+            if links:
+                href = links[0]
+                if "google.com/url?" in href:
+                    try:
+                        parsed = urllib.parse.urlparse(href)
+                        qs = urllib.parse.parse_qs(parsed.query)
+                        if "q" in qs:
+                            href = qs["q"][0]
+                    except Exception:
+                        pass
+                return href.strip()
+        except Exception:
+            pass
+
+        return None
+
+    async def _extract_from_menu_tab(self, page: Page) -> Tuple[List[MenuItem], List[str]]:
+        """Checks for official Thực đơn / Menu tab (with retry) and extracts structured dishes and menu photos."""
+        dishes: List[MenuItem] = []
+        photos: List[str] = []
+        try:
+            # Wait for tab with text "Thực đơn" or "Menu" (up to 12 retries)
+            tab_clicked = False
+            for _ in range(12):
+                menu_tab = page.locator('button[role="tab"]').filter(has_text=re.compile(r'thực đơn|menu', re.I)).first
+                if await menu_tab.count() > 0:
+                    try:
+                        await menu_tab.click(timeout=2000)
+                    except Exception:
+                        await menu_tab.evaluate("el => el.click()")
+                    tab_clicked = True
+                    break
+                else:
+                    tabs = await page.query_selector_all('button[role="tab"], div[role="tab"], button.hh2c6')
+                    for t in tabs:
+                        txt = (await t.inner_text() or await t.get_attribute("aria-label") or "").strip().lower()
+                        if "thực đơn" in txt or "menu" in txt:
+                            try:
+                                await t.click()
+                            except Exception:
+                                await t.evaluate("el => el.click()")
+                            tab_clicked = True
+                            break
+                    if tab_clicked:
+                        break
+                await page.wait_for_timeout(400)
+
+            if not tab_clicked:
+                return [], []
+
+            await page.wait_for_timeout(1500)
+
+            # Scroll menu container down to load all items and photos
+            try:
+                for _ in range(6):
+                    await page.evaluate('''() => {
+                        const scroller = document.querySelector('div.m6QErb.DxyBCb, div.m6QErb[tabindex="-1"], div.dS8AEf');
+                        if (scroller) scroller.scrollTop += 1500;
+                    }''')
+                    await page.wait_for_timeout(500)
+            except Exception:
+                pass
+
+            data = await page.evaluate(r'''() => {
+                const scroller = document.querySelector('div.m6QErb.DxyBCb, div.m6QErb[tabindex="-1"], div.dS8AEf');
+                if (!scroller) return { rawDishes: [], rawPhotos: [] };
+
+                const rawDishes = [];
+                const rawPhotos = [];
+                const seenP = new Set();
+                const seenN = new Set();
+
+                // 1. Process all dish cards: div.ofKBgf, div.XiKgde, div[jscontroller], cards
+                const cards = scroller.querySelectorAll('div.ofKBgf, div.XiKgde, div[jscontroller="AGAKid"], div.wcwwRb, div.U7v8Je');
+                for (const c of cards) {
+                    const nameEl = c.querySelector('span.zaTlhd, div.KoY8Lc, div.fontBodyMedium, div.fontTitleSmall, div[role="heading"], h3, h4');
+                    let name = nameEl ? nameEl.innerText.trim() : '';
+                    if (!name) {
+                        const firstLine = (c.innerText || '').split('\n')[0].trim();
+                        if (firstLine && firstLine.length < 50 && !firstLine.includes('₫') && !firstLine.includes('$') && firstLine !== 'Điểm nổi bật' && firstLine !== 'Menu') {
+                            name = firstLine;
+                        }
+                    }
+
+                    let price = null;
+                    const priceMatch = (c.innerText || '').match(/([\d.,]+\s*(?:₫|đ|VND|VNĐ|k|\$|USD))/i);
+                    if (priceMatch) price = priceMatch[1].trim();
+
+                    const img = c.querySelector('img[src*="googleusercontent.com"], div[style*="googleusercontent.com"]');
+                    let photo = img ? (img.getAttribute('src') || img.style.backgroundImage || '') : '';
+
+                    if (photo) {
+                        rawPhotos.push(photo);
+                        seenP.add(photo);
+                    }
+                    if (name && !seenN.has(name.toLowerCase())) {
+                        seenN.add(name.toLowerCase());
+                        rawDishes.push({ name, price, photo: photo || null });
+                    }
+                }
+
+                // 2. Also check traditional menu items or list items if structured menu
+                const traditionalItems = scroller.querySelectorAll('div.m6QErb > div[role="button"], div.Gpq6kf');
+                for (const item of traditionalItems) {
+                    const title = item.querySelector('div.fontTitleSmall, div[role="heading"]');
+                    let name = title ? title.innerText.trim() : '';
+                    if (name && !seenN.has(name.toLowerCase())) {
+                        seenN.add(name.toLowerCase());
+                        let price = null;
+                        const priceMatch = (item.innerText || '').match(/([\d.,]+\s*(?:₫|đ|VND|VNĐ|k|\$|USD))/i);
+                        if (priceMatch) price = priceMatch[1].trim();
+                        rawDishes.push({ name, price, photo: null });
+                    }
+                }
+
+                // 3. Collect all images in menu scroller
+                const allImgEls = scroller.querySelectorAll('img[src*="googleusercontent.com"], div[style*="googleusercontent.com"]');
+                for (const el of allImgEls) {
+                    const src = el.getAttribute('src') || el.style.backgroundImage || '';
+                    if (src && !seenP.has(src)) {
+                        seenP.add(src);
+                        rawPhotos.push(src);
+                    }
+                }
+
+                return { rawDishes, rawPhotos };
+            }''')
+
+            seen_photos = set()
+            for rd in data['rawDishes']:
+                dishes.append(MenuItem(
+                    name=clean_text(rd['name']),
+                    price=clean_text(rd.get('price')) if rd.get('price') else None,
+                    photo=clean_image_url(rd.get('photo')) if rd.get('photo') else None
+                ))
+
+            for rp in data['rawPhotos']:
+                cleaned = clean_image_url(rp)
+                if cleaned and cleaned not in seen_photos and 'a-' not in cleaned:
+                    seen_photos.add(cleaned)
+                    photos.append(cleaned)
+
+        except Exception:
+            pass
+
+        return dishes, photos
+
+    async def _extract_overview_popular_dishes(self, page: Page) -> List[MenuItem]:
+        """Extracts popular dishes / dishes mentioned from Overview."""
+        dishes: List[MenuItem] = []
+        seen_names = set()
+
+        try:
+            # 1. Popular dishes section in Overview
+            popular_items = await page.evaluate(r'''() => {
+                const results = [];
+                const headings = Array.from(document.querySelectorAll('h2, h3, div[role="heading"]'))
+                    .filter(h => /món ăn phổ biến|món phổ biến|món nổi bật|popular dishes/i.test(h.innerText));
+                
+                for (const h of headings) {
+                    const container = h.closest('div.m6QErb, div.section-layout') || h.parentElement;
+                    if (!container) continue;
+                    const cards = container.querySelectorAll('div[role="button"], div.fontHeadlineSmall, div.Gpq6kf');
+                    for (const c of cards) {
+                        const txt = c.innerText.trim();
+                        if (txt && txt.length < 60) {
+                            const lines = txt.split('\n').map(l => l.trim()).filter(Boolean);
+                            const name = lines[0];
+                            const desc = lines.length > 1 ? lines.slice(1).join(' - ') : null;
+                            const img = c.querySelector('img[src*="googleusercontent.com"], div[style*="googleusercontent.com"]');
+                            const photo = img ? (img.getAttribute('src') || img.getAttribute('style')) : null;
+                            results.push({ name, description: desc, photo });
+                        }
+                    }
+                }
+                return results;
+            }''')
+
+            for p in popular_items:
+                name = clean_text(p.get("name", ""))
+                if name and name.lower() not in seen_names and len(name) >= 3:
+                    seen_names.add(name.lower())
+                    photo = clean_image_url(p.get("photo")) if p.get("photo") else None
+                    dishes.append(MenuItem(
+                        name=name,
+                        description=clean_text(p.get("description")) if p.get("description") else None,
+                        photo=photo
+                    ))
+
+            # 2. Topic chips in Overview (if available before clicking Reviews)
+            topic_chips = await page.evaluate(r'''() => {
+                const chips = [];
+                const scroller = document.querySelector('div.m6QErb.DxyBCb, div.m6QErb.DsmM0c, div.dS8AEf');
+                if (!scroller) return chips;
+                const els = scroller.querySelectorAll('button.e2CuFe, div.fp6G2d');
+                for (const el of els) {
+                    const text = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                    if (text) chips.push(text);
+                }
+                return chips;
+            }''')
+
+            generic_stop_words = {
+                "tất cả", "all", "giá", "giá cả", "price", "phục vụ", "dịch vụ", "service",
+                "không gian", "view", "nhân viên", "staff", "vị trí", "địa điểm", "location",
+                "quán", "nhà hàng", "restaurant", "đồ ăn", "thức ăn", "ẩm thực", "food",
+                "chất lượng", "vệ sinh", "chỗ ngồi", "bàn", "chờ", "thanh toán", "tiền",
+                "mới nhất", "xếp hạng cao nhất", "phù hợp nhất", "trải nghiệm",
+                "mặc định", "vệ tinh", "địa hình", "giao thông", "chế độ xem phố", "bản đồ",
+                "chia sẻ", "lưu", "đường đi", "gần đó", "gửi tới điện thoại", "thêm ảnh",
+                "thêm ảnh và video", "viết bài đánh giá", "đề xuất chỉnh sửa", "ảnh", "bài đánh giá",
+                "tổng quan", "giới thiệu", "thực đơn", "menu"
+            }
+
+            for raw_chip in topic_chips:
+                raw_clean = clean_text(raw_chip)
+                match = re.search(r'^(.*?)\s*\((\d+)\)$', raw_clean)
+                if match:
+                    dish_name = clean_text(match.group(1))
+                    count_str = match.group(2)
+                    if (
+                        dish_name
+                        and dish_name.lower() not in generic_stop_words
+                        and dish_name.lower() not in seen_names
+                        and len(dish_name) >= 3
+                    ):
+                        seen_names.add(dish_name.lower())
+                        dishes.append(MenuItem(
+                            name=dish_name,
+                            description=f"{count_str} lượt nhắc trong đánh giá"
+                        ))
+        except Exception:
+            pass
+
+        return dishes
+
+    async def _extract_menu_photos(self, page: Page) -> List[str]:
+        """Extracts menu photos from Photos tab under Thực đơn category (no limit)."""
+        menu_photos: List[str] = []
+        seen_photos = set()
+
+        try:
+            # 1. Open Photos tab
+            photo_tab = page.locator('button[role="tab"]').filter(has_text=re.compile(r'ảnh|photos', re.I)).first
+            photo_opened = False
+            if await photo_tab.count() > 0:
+                try:
+                    await photo_tab.click(timeout=2000)
+                    await page.wait_for_timeout(1200)
+                    photo_opened = True
+                except Exception:
+                    pass
+
+            if not photo_opened:
+                photo_btn = page.locator('button:has-text("Xem ảnh"), button[aria-label*="Ảnh của"], button[jsaction*="heroHeaderImage"]').first
+                if await photo_btn.count() > 0:
+                    try:
+                        await photo_btn.click(timeout=2000)
+                        await page.wait_for_timeout(1200)
+                        photo_opened = True
+                    except Exception:
+                        pass
+
+            if not photo_opened:
+                return []
+
+            # 2. Find and click "Thực đơn" / "Menu" category button
+            menu_cat_btn = page.locator(
+                'button[role="tab"], button[role="radio"], button.Gpq6kf, div.Gpq6kf, button[aria-label*="Thực đơn"], button[aria-label*="Menu"]'
+            ).filter(has_text=re.compile(r'thực đơn|menu', re.I)).first
+
+            if await menu_cat_btn.count() == 0:
+                return []
+
+            try:
+                await menu_cat_btn.click(timeout=2000)
+                await page.wait_for_timeout(1500)
+            except Exception:
+                await menu_cat_btn.evaluate("el => el.click()")
+                await page.wait_for_timeout(1500)
+
+            # 3. Scroll to load all menu photos until exhausted
+            consecutive_no_new = 0
+            for _ in range(25):
+                imgs = await page.evaluate(r'''() => {
+                    const urls = [];
+                    const all = document.querySelectorAll('img[src*="googleusercontent.com"], div[style*="googleusercontent.com"], a[data-photo-index] div');
+                    for (const el of all) {
+                        const src = el.getAttribute('src') || el.getAttribute('style') || '';
+                        if (src.includes('googleusercontent.com')) {
+                            urls.push(src);
+                        }
+                    }
+                    return urls;
+                }''')
+
+                new_found = False
+                for raw_url in imgs:
+                    cleaned = clean_image_url(raw_url)
+                    if cleaned and cleaned not in seen_photos and "a-" not in cleaned:
+                        seen_photos.add(cleaned)
+                        menu_photos.append(cleaned)
+                        new_found = True
+
+                if new_found:
+                    consecutive_no_new = 0
+                else:
+                    consecutive_no_new += 1
+                    if consecutive_no_new >= 3:
+                        break
+
+                # Scroll photo container
+                try:
+                    await page.evaluate('''() => {
+                        const scroller = document.querySelector('div.m6QErb.DxyBCb, div.m6QErb[tabindex="-1"], div.dS8AEf');
+                        if (scroller) scroller.scrollTop += 2000;
+                    }''')
+                    await page.wait_for_timeout(600)
+                except Exception:
+                    break
+
+        except Exception:
+            pass
+
+        return menu_photos
+
+    async def _ensure_overview_tab(self, page: Page):
+        """Switches back to Overview tab if another tab was active."""
+        try:
+            overview_tab = page.locator('button[role="tab"]').filter(has_text=re.compile(r'tổng quan|overview', re.I)).first
+            if await overview_tab.count() > 0:
+                is_sel = await overview_tab.get_attribute("aria-selected")
+                if is_sel != "true":
+                    await overview_tab.click(timeout=1500)
+                    await page.wait_for_timeout(600)
+            else:
+                back_btn = page.locator('button[aria-label*="Quay lại"], button[aria-label*="Back"], button.hV1i2e').first
+                if await back_btn.count() > 0:
+                    await back_btn.click(timeout=1500)
+                    await page.wait_for_timeout(600)
+        except Exception:
+            pass
+
+    async def _extract_dishes_from_active_reviews(self, page: Page) -> List[MenuItem]:
+        """Harvests dish names from topic filter chips when Reviews tab is active."""
+        dishes: List[MenuItem] = []
+        seen = set()
+        try:
+            chips = await page.evaluate(r'''() => {
+                const results = [];
+                const scroller = document.querySelector('div.m6QErb.DxyBCb, div.m6QErb.DsmM0c, div.dS8AEf');
+                if (!scroller) return results;
+                const els = scroller.querySelectorAll('button.e2CuFe, div.fp6G2d');
+                for (const el of els) {
+                    const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                    if (t) results.push(t);
+                }
+                return results;
+            }''')
+
+            generic_stop_words = {
+                "tất cả", "all", "giá", "giá cả", "price", "phục vụ", "dịch vụ", "service",
+                "không gian", "view", "nhân viên", "staff", "vị trí", "địa điểm", "location",
+                "quán", "nhà hàng", "restaurant", "đồ ăn", "thức ăn", "ẩm thực", "food",
+                "chất lượng", "vệ sinh", "chỗ ngồi", "bàn", "chờ", "thanh toán", "tiền",
+                "mới nhất", "xếp hạng cao nhất", "phù hợp nhất", "trải nghiệm",
+                "mặc định", "vệ tinh", "địa hình", "giao thông", "chế độ xem phố", "bản đồ",
+                "chia sẻ", "lưu", "đường đi", "gần đó", "gửi tới điện thoại", "thêm ảnh",
+                "thêm ảnh và video", "viết bài đánh giá", "đề xuất chỉnh sửa", "ảnh", "bài đánh giá",
+                "tổng quan", "giới thiệu", "thực đơn", "menu"
+            }
+
+            for raw in chips:
+                raw_clean = clean_text(raw)
+                match = re.search(r'^(.*?)\s*\((\d+)\)$', raw_clean)
+                if match:
+                    name = clean_text(match.group(1))
+                    count = match.group(2)
+                    if (
+                        name
+                        and name.lower() not in generic_stop_words
+                        and name.lower() not in seen
+                        and len(name) >= 3
+                    ):
+                        seen.add(name.lower())
+                        dishes.append(MenuItem(name=name, description=f"{count} lượt nhắc trong đánh giá"))
+        except Exception:
+            pass
+        return dishes
 
     async def _extract_reviews(
         self,

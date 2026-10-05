@@ -23,6 +23,25 @@ class Coordinates:
         return asdict(self)
 
 @dataclass
+class MenuItem:
+    name: str = ""
+    price: Optional[str] = None
+    description: Optional[str] = None
+    photo: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class MenuInfo:
+    link: Optional[str] = None
+    dishes: List[MenuItem] = field(default_factory=list)
+    photos: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
 class Place:
     title: str = ""
     place_id: Optional[str] = None
@@ -34,7 +53,7 @@ class Place:
     address: Optional[str] = None
     phone: Optional[str] = None
     website: Optional[str] = None
-    menu: Optional[str] = None
+    menu: MenuInfo = field(default_factory=MenuInfo)
     booking_link: Optional[str] = None
     plus_code: Optional[str] = None
     opening_hours: Optional[Dict[str, str]] = None

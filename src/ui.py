@@ -42,6 +42,7 @@ def print_summary_table(places: List[Place], keyword: str):
     table.add_column("Địa chỉ", style="white", width=28)
     table.add_column("Reviews cào", justify="center", style="magenta", width=11)
     table.add_column("Ảnh", justify="center", style="blue", width=7)
+    table.add_column("Thực đơn", justify="center", style="bold green", width=16)
     table.add_column("Tiện ích/About", justify="center", style="green", width=14)
 
     for i, p in enumerate(places, 1):
@@ -56,6 +57,18 @@ def print_summary_table(places: List[Place], keyword: str):
         about_count = sum(len(v) for v in p.about.values()) if p.about else 0
         about_str = f"{about_count} mục" if about_count > 0 else "0"
 
+        # Format menu column
+        menu_desc = "-"
+        if p.menu:
+            parts = []
+            if p.menu.link:
+                parts.append("Link")
+            if p.menu.dishes:
+                parts.append(f"{len(p.menu.dishes)} món")
+            if p.menu.photos:
+                parts.append(f"{len(p.menu.photos)} ảnh")
+            menu_desc = " · ".join(parts) if parts else "-"
+
         table.add_row(
             str(i),
             title,
@@ -66,6 +79,7 @@ def print_summary_table(places: List[Place], keyword: str):
             addr,
             rev_count,
             photo_count,
+            menu_desc,
             about_str
         )
 
@@ -85,6 +99,13 @@ def print_demo_json(places: List[Place]):
         demo_copy["_note"] = f"... và {len(places[0].reviews) - 2} đánh giá khác"
     if len(demo_copy.get("photos", [])) > 3:
         demo_copy["photos"] = demo_copy["photos"][:3] + [f"... còn {len(places[0].photos) - 3} ảnh nữa"]
+    if "menu" in demo_copy and isinstance(demo_copy["menu"], dict):
+        dishes_list = demo_copy["menu"].get("dishes", [])
+        if len(dishes_list) > 3:
+            demo_copy["menu"]["dishes"] = dishes_list[:3] + [{"_note": f"... còn {len(dishes_list) - 3} món nữa"}]
+        menu_photos = demo_copy["menu"].get("photos", [])
+        if len(menu_photos) > 2:
+            demo_copy["menu"]["photos"] = menu_photos[:2] + [f"... còn {len(menu_photos) - 2} ảnh thực đơn nữa"]
 
     json_str = json.dumps([demo_copy], indent=2, ensure_ascii=False)
     syntax = Syntax(json_str, "json", theme="monokai", line_numbers=True)
