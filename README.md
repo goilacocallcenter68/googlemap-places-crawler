@@ -37,17 +37,128 @@ googlemap-places/
 
 ---
 
-## 🛠️ Cài đặt & Khởi chạy
+## 🛠️ Hướng dẫn Setup Môi trường (Environment Setup)
 
-### 1. Kích hoạt môi trường (hoặc dùng trực tiếp `.venv/bin/python`)
+### 1. Yêu cầu hệ thống (Prerequisites)
+- **Hệ điều hành**: Linux (Ubuntu, Debian, Fedora, CentOS, RHEL...), macOS, hoặc Windows.
+- **Python**: Phiên bản 3.10 trở lên (khuyến nghị Python 3.11 - 3.14).
+- **Quyền hạn**: Quyền chạy terminal thông thường (chỉ cần `sudo` nếu muốn cài thư viện hệ thống đồ hoạ Linux hoặc đăng ký systemd service).
 
+---
+
+### 2. Các bước cài đặt từ đầu (Step-by-step)
+
+#### Bước 1: Clone mã nguồn hoặc di chuyển vào thư mục dự án
 ```bash
-# Kích hoạt venv
-source .venv/bin/activate
+cd googlemap-places
+```
 
-# Cài đặt thư viện
+#### Bước 2: Khởi tạo môi trường ảo Python (`.venv`)
+Khởi tạo môi trường ảo tách biệt để tránh xung đột thư viện:
+```bash
+python3 -m venv .venv
+```
+
+#### Bước 3: Kích hoạt môi trường ảo (Activate)
+- **Trên Linux / macOS**:
+  ```bash
+  source .venv/bin/activate
+  ```
+- **Trên Windows (PowerShell)**:
+  ```powershell
+  .venv\Scripts\Activate.ps1
+  ```
+- **Trên Windows (Command Prompt - CMD)**:
+  ```cmd
+  .venv\Scripts\activate.bat
+  ```
+
+> 💡 **Mẹo:** File CLI `./cron.py` và `./sync_itravels.py` đã được thiết kế cơ chế tự động tìm và chuyển sang `.venv/bin/python3` nên bạn có thể gõ trực tiếp `./cron.py ...` mà không bắt buộc phải gõ `source .venv/bin/activate` mỗi lần.
+
+#### Bước 4: Cài đặt các thư viện Python
+Cập nhật `pip` và cài đặt các thư viện từ `requirements.txt`:
+```bash
+pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+Danh sách thư viện cốt lõi:
+- `playwright`: Tự động hoá trình duyệt Chromium để cào Google Maps.
+- `rich`: Giao diện CLI chuyên nghiệp (bảng dữ liệu, màu sắc, thanh tiến trình, dashboard).
+- `pyyaml`: Đọc & ghi file cấu hình `jobs.yaml`.
+- `croniter`: Xử lý lịch chạy định kỳ theo cú pháp cron tiêu chuẩn.
+- `python-slugify`: Chuẩn hoá tên file và keyword tiếng Việt.
+- `requests`: Gửi dữ liệu đồng bộ REST API đến iTravels.
+
+#### Bước 5: Cài đặt trình duyệt Playwright (Chromium)
+Tải trình duyệt Chromium headless được tối ưu cho Playwright:
+```bash
 playwright install chromium
+```
+
+> ⚠️ **Lưu ý quan trọng cho Linux Server / VPS (không có Desktop GUI):**  
+> Nếu bạn chạy trên VPS/Server Ubuntu/Debian, cần cài đặt thêm các thư viện đồ họa hệ thống (OS dependencies) cho Chromium:
+> ```bash
+> # Với Ubuntu / Debian:
+> sudo playwright install-deps chromium
+> 
+> # Hoặc cài thủ công các gói cơ bản nếu không dùng lệnh trên:
+> sudo apt-get update && sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2
+> ```
+
+---
+
+### 3. Cấu hình Tham số & Biến Môi Trường (Config & Env)
+
+Dự án hỗ trợ 2 hình thức cấu hình linh hoạt:
+
+#### Cách 1: Cấu hình trực tiếp trong `jobs.yaml` (Khuyến nghị)
+Hệ thống tự động nạp lại (Hot-reload) mỗi khi bạn lưu file `jobs.yaml`:
+```yaml
+settings:
+  cleanup_old_files: true   # Tự động xoá file JSON cũ sau khi cào và sync thành công
+  itravels_api:
+    api_key: "PcCnUPgiOnZ0wumxG-ZyX2aBLpdlMGC6OecAyfXPEVM"
+    base_url: "https://api.itravels.vn"
+    site: "khanh-hoa"       # Mã tỉnh thành gửi vào API
+    apply: 1                # 1: Ghi thực tế vào DB; 0: Chế độ kiểm tra (dry-run)
+    batch_size: 200         # Số lượng bản ghi gửi trong 1 request POST
+    max_retries: 3          # Tự động thử lại khi gặp 409 hoặc ngắt mạng
+```
+
+#### Cách 2: Sử dụng Biến môi trường (Environment Variables)
+Nếu muốn bảo mật key hoặc deploy trên Docker / CI-CD, bạn có thể copy file mẫu [`.env.example`](file:///home/tientp/Workspace/work/dailyve/googlemap-places/.env.example):
+```bash
+cp .env.example .env
+```
+Nội dung hỗ trợ:
+```bash
+export ITRAVELS_API_KEY="PcCnUPgiOnZ0wumxG-ZyX2aBLpdlMGC6OecAyfXPEVM"
+export ITRAVELS_SITE="khanh-hoa"
+export ITRAVELS_BASE_URL="https://api.itravels.vn"
+```
+
+---
+
+### 4. Kiểm tra & Chạy thử nghiệm môi trường (Verification)
+
+#### Kiểm tra file cấu hình và kết nối:
+```bash
+./cron.py validate
+```
+
+#### Chạy thử nghiệm 1 tác vụ nhỏ (Smoke Test):
+```bash
+# Cào thử 3 địa điểm của ẩm thực để kiểm tra trình duyệt Playwright
+./cron.py run am_thuc_khanh_hoa -l 3
+
+# Kiểm tra đồng bộ API ở chế độ an toàn (không ghi dữ liệu)
+./sync_itravels.py --dry-run
+```
+
+#### Kiểm tra bảng trạng thái tổng quát:
+```bash
+./cron.py status
 ```
 
 ### 2. Chạy ứng dụng

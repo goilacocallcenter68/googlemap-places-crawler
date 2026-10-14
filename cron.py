@@ -533,6 +533,7 @@ def cmd_start(args):
         daemon_log_file = open(daemon_log_path, "a", encoding="utf-8")
         proc = subprocess.Popen(
             start_cmd,
+            stdin=subprocess.DEVNULL,
             stdout=daemon_log_file,
             stderr=daemon_log_file,
             start_new_session=True,
