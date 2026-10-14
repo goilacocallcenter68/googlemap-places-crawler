@@ -50,6 +50,10 @@ data/*
 
 # Logs
 *.log
+logs/
+
+# Generated services
+googlemaps-cron.service
 
 # IDE & editors
 .vscode/
