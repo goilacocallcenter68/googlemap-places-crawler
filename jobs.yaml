@@ -13,14 +13,14 @@
 
 # Cấu hình chung cho hệ thống đồng bộ API iTravels
 settings:
-  cleanup_old_files: true   # Tự động xoá các file JSON kết quả cũ sau khi cào & đồng bộ thành công
+  cleanup_old_files: true # Tự động xoá các file JSON kết quả cũ sau khi cào & đồng bộ thành công
   itravels_api:
     api_key: "PcCnUPgiOnZ0wumxG-ZyX2aBLpdlMGC6OecAyfXPEVM"
     base_url: "https://api.itravels.vn"
-    site: "khanh-hoa"       # Mã tỉnh thành (có thể đổi sang tỉnh khác)
-    apply: 1                # 1: Ghi thực tế vào CSDL; 0: Chỉ kiểm tra báo cáo thử nghiệm
-    batch_size: 200         # Số bản ghi gửi trong 1 request (tối đa 2000, 20MB)
-    max_retries: 3          # Số lần thử lại tự động khi gặp lỗi 409 hoặc ngắt mạng
+    site: "khanh-hoa" # Mã tỉnh thành (có thể đổi sang tỉnh khác)
+    apply: 1 # 1: Ghi thực tế vào CSDL; 0: Chỉ kiểm tra báo cáo thử nghiệm
+    batch_size: 200 # Số bản ghi gửi trong 1 request (tối đa 2000, 20MB)
+    max_retries: 3 # Số lần thử lại tự động khi gặp lỗi 409 hoặc ngắt mạng
 
 jobs:
   # ----------------------------------------------------------------------------
@@ -30,14 +30,14 @@ jobs:
   khach_san_khanh_hoa:
     enabled: true
     description: "Cào danh sách khách sạn tại Khánh Hoà và đồng bộ iTravels"
-    itravels_type: "khach-san"  # Tự động bắn API import khách sạn khi cào xong
-    auto_sync: true             # Tự động đồng bộ sau khi cào
+    itravels_type: "khach-san" # Tự động bắn API import khách sạn khi cào xong
+    auto_sync: true # Tự động đồng bộ sau khi cào
     schedule:
-      cron: "0 2 * * 0"         # 02:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
-    limit:                      # Giới hạn số địa điểm cào mỗi keyword (để trống nếu muốn cào tất cả)
-    max_reviews: 50             # Số bài review tối đa mỗi địa điểm
-    concurrency: 4              # Số tab cào song song
-    sort: "most_relevant"       # most_relevant, newest, highest_rating, lowest_rating
+      cron: "0 2 * * 0" # 02:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
+    limit: # Giới hạn số địa điểm cào mỗi keyword (để trống nếu muốn cào tất cả)
+    max_reviews: 50 # Số bài review tối đa mỗi địa điểm
+    concurrency: 4 # Số tab cào song song
+    sort: "most_relevant" # most_relevant, newest, highest_rating, lowest_rating
     keywords:
       - "khách sạn tại khánh hoà"
 
@@ -48,10 +48,10 @@ jobs:
   homestay_khanh_hoa:
     enabled: true
     description: "Cào thông tin homestay nghỉ dưỡng tại Khánh Hoà và đồng bộ iTravels"
-    itravels_type: "homestay"   # Tự động bắn API import homestay khi cào xong
+    itravels_type: "homestay" # Tự động bắn API import homestay khi cào xong
     auto_sync: true
     schedule:
-      cron: "0 3 * * 0"         # 03:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
+      cron: "0 3 * * 0" # 03:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
     limit:
     max_reviews: 50
     concurrency: 4
@@ -65,17 +65,16 @@ jobs:
   # ----------------------------------------------------------------------------
   dia_danh_khanh_hoa:
     enabled: true
-    description: "Cào các địa danh, danh lam thắng cảnh tại Khánh Hoà và đồng bộ iTravels"
-    itravels_type: "dia-danh"   # Tự động bắn API import địa danh khi cào xong
+    description: "Cào các địa danh, danh lam thắng cảnh theo danh sách CSV và đồng bộ iTravels"
+    itravels_type: "dia-danh" # Tự động bắn API import địa danh khi cào xong
     auto_sync: true
     schedule:
-      cron: "0 4 * * 0"         # 04:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
-    limit:
-    max_reviews: 50
-    concurrency: 4
-    sort: "most_relevant"
-    keywords:
-      - "địa danh tại khánh hoà"
+      cron: "0 4 * * 0" # 04:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
+    limit: 1 # Lấy 1 địa điểm chính xác nhất cho mỗi địa danh trong file
+    max_reviews: 50 # Số bài review tối đa mỗi địa điểm
+    concurrency: 4 # Số tab cào song song
+    sort: "most_relevant" # most_relevant, newest, highest_rating, lowest_rating
+    keywords_file: "places.example.csv" # Đọc danh sách địa danh từ file CSV
 
   # ----------------------------------------------------------------------------
   # Tác vụ 4: Ẩm thực Khánh Hoà (1 tuần 1 lần - Chủ Nhật lúc 05:00 AM)
@@ -84,10 +83,10 @@ jobs:
   am_thuc_khanh_hoa:
     enabled: true
     description: "Cào nhà hàng, quán ăn, đặc sản Khánh Hoà và đồng bộ iTravels"
-    itravels_type: "am-thuc"    # Tự động bắn API import ẩm thực khi cào xong
+    itravels_type: "am-thuc" # Tự động bắn API import ẩm thực khi cào xong
     auto_sync: true
     schedule:
-      cron: "0 5 * * 0"         # 05:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
+      cron: "0 5 * * 0" # 05:00 sáng Chủ Nhật hàng tuần (1 tuần / 1 lần)
     limit:
     max_reviews: 50
     concurrency: 4

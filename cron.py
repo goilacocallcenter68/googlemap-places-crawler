@@ -166,7 +166,12 @@ def cmd_status(args):
         else:
             status_badge = "[dim]⏳ Chờ chạy[/dim]"
 
-        kw_count = str(len(j.keywords))
+        kw_source = ""
+        if getattr(j, "keywords_file", None):
+            kw_source = f"\n[dim]({os.path.basename(j.keywords_file)})[/dim]"
+        elif getattr(j, "keywords_files", None):
+            kw_source = f"\n[dim]({len(j.keywords_files)} files)[/dim]"
+        kw_count = f"{len(j.keywords)}{kw_source}"
         lim_str = str(j.limit) if j.limit else "∞"
 
         last_run_str = "-"
@@ -337,12 +342,13 @@ def cmd_run(args):
             return
 
     limit_desc = f"\n• Giới hạn tạm thời: [yellow]{args.limit} địa điểm/keyword[/yellow]" if args.limit else ""
+    max_kw_desc = f"\n• Giới hạn số keyword: [yellow]{args.max_keywords} từ khóa đầu tiên[/yellow]" if getattr(args, "max_keywords", None) else ""
     mode_desc = "\n• Chế độ: [magenta]Headed (hiện trình duyệt)[/magenta]" if args.headed else ""
 
     console.print(Panel(
         f"[bold cyan]Danh sách task cào ngay lập tức tuần tự ({len(target_jobs)} task):[/bold cyan]\n"
         f"[yellow]{', '.join(target_jobs)}[/yellow]"
-        f"{limit_desc}{mode_desc}",
+        f"{limit_desc}{max_kw_desc}{mode_desc}",
         title="[bold green]🚀 Cào Dữ Liệu Ngay Lập Tức (Run Now)[/bold green]",
         border_style="green",
     ))
@@ -351,6 +357,7 @@ def cmd_run(args):
         target_jobs,
         limit_override=args.limit,
         headed=args.headed,
+        max_keywords_override=getattr(args, "max_keywords", None),
     ))
 
     # Bảng tóm tắt kết quả
@@ -494,7 +501,12 @@ def cmd_validate(args):
         for name, j in jobs.items():
             status_txt = "[green]Bật[/green]" if j.enabled else "[dim]Tắt[/dim]"
             sched_txt = f"every {j.schedule.get('every')}" if 'every' in j.schedule else f"cron '{j.schedule.get('cron')}'"
-            console.print(f"  • [cyan]{name}[/cyan] ({status_txt}): {len(j.keywords)} keywords, lịch: {sched_txt}, limit: {j.limit or 'all'}")
+            file_info = ""
+            if getattr(j, "keywords_file", None):
+                file_info = f" (file: {j.keywords_file})"
+            elif getattr(j, "keywords_files", None):
+                file_info = f" (files: {', '.join(j.keywords_files)})"
+            console.print(f"  • [cyan]{name}[/cyan] ({status_txt}): {len(j.keywords)} keywords{file_info}, lịch: {sched_txt}, limit: {j.limit or 'all'}")
         console.print("")
 
 
@@ -698,6 +710,10 @@ def main():
     p_run.add_argument("-a", "--all", action="store_true", help="Cào lần lượt tất cả các task đang bật")
     p_run.add_argument(
         "-l", "--limit", type=int, default=None, help="Tùy chọn giới hạn số địa điểm (ví dụ: -l 2 để test nhanh)"
+    )
+    p_run.add_argument(
+        "-m", "--max-keywords", type=int, default=None,
+        help="Giới hạn số lượng keyword/địa danh cần cào trong mỗi job (dùng để test nhanh một vài địa danh đầu tiên)"
     )
     p_run.add_argument("--headed", action="store_true", help="Hiển thị cửa sổ trình duyệt khi cào")
 

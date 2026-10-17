@@ -383,7 +383,25 @@ jobs:
     keywords:
       - "phở bò ngon hoàn kiếm hà nội"
       - "bún chả hương liên hà nội"
+
+  # Nhóm 3: Nạp danh sách từ khóa linh hoạt từ file CSV/TXT/JSON (Khả năng tái sử dụng cao)
+  dia_danh_khanh_hoa:
+    enabled: true
+    description: "Cào địa danh du lịch từ file CSV"
+    itravels_type: "dia-danh"
+    auto_sync: true
+    schedule:
+      cron: "0 4 * * 0"
+    limit: 1                    # Lấy 1 địa điểm chính xác nhất cho mỗi địa danh trong file
+    keywords_file: "place.example.csv"  # Đường dẫn file CSV/TXT/JSON chứa danh sách
+    # keyword_template: "{keyword} Khánh Hoà" # Tùy chọn template nối thêm địa phương
 ```
+
+> 💡 **Tính năng nạp từ khóa ngoài (Keyword Loader):**
+> - **Định dạng hỗ trợ**: `.csv`, `.tsv`, `.txt` (mỗi dòng 1 từ khóa), `.json` (mảng chuỗi).
+> - **Cấu hình đa file**: Dùng `keywords_files: ["file1.csv", "file2.txt"]` để nạp nhiều file cùng lúc.
+> - **Template từ khóa**: Dùng `keyword_template: "{keyword} Tỉnh_Thành"` để tự động thêm hậu tố tìm kiếm cho mọi từ khóa trong danh sách.
+> - **Hot-reload tự động**: Scheduler tự động phát hiện khi bạn thêm/sửa/xóa dòng trong các file từ khóa ngoài mà không cần khởi động lại tiến trình!
 
 ---
 
@@ -437,6 +455,9 @@ Cho phép cào ngay lập tức mà không cần chờ đến giờ hẹn trong 
 
 # Test nhanh với số lượng địa điểm giới hạn (ví dụ: cào thử 2 địa điểm/keyword)
 ./cron.py run am_thuc_khanh_hoa -l 2
+
+# Test nhanh một vài từ khóa/địa danh đầu tiên của job có danh sách dài (ví dụ: cào thử 3 địa danh đầu tiên)
+./cron.py run dia_danh_khanh_hoa -m 3
 
 # Mở cửa sổ trình duyệt (headed mode) để theo dõi trực tiếp
 ./cron.py run homestay_khanh_hoa --headed

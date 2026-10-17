@@ -18,6 +18,7 @@ from rich.table import Table
 from src.models import Place
 from src.scraper import GoogleMapsScraper
 from src.scheduler_db import SchedulerDB, DEFAULT_DB_PATH
+from src.keyword_loader import resolve_job_keywords
 from src.itravels_sync import (
     ITravelsClient,
     normalize_endpoint_type,
@@ -96,12 +97,20 @@ def get_global_settings() -> Dict[str, Any]:
 
 
 class JobConfig:
-    def __init__(self, name: str, data: Dict[str, Any]):
+    def __init__(self, name: str, data: Dict[str, Any], config_dir: Optional[str] = None):
         self.name = name
         self.enabled = bool(data.get("enabled", True))
         self.description = data.get("description", "")
         self.schedule = data.get("schedule", {})
-        self.keywords = [str(k).strip() for k in data.get("keywords", []) if str(k).strip()]
+        
+        # Hỗ trợ nạp từ khóa linh hoạt từ file (CSV, TXT, JSON...) hoặc inline list
+        self.keywords_file = data.get("keywords_file") or data.get("places_file")
+        self.keywords_files = data.get("keywords_files") or data.get("places_files")
+        self.keyword_template = data.get("keyword_template")
+        self.keywords, self.watched_files, self.loader_errors = resolve_job_keywords(
+            data, base_dir=config_dir
+        )
+
         self.limit = data.get("limit", None)
         self.max_reviews = data.get("max_reviews", 100)
         self.concurrency = int(data.get("concurrency", 4))
@@ -117,8 +126,12 @@ class JobConfig:
 
     def validate(self) -> List[str]:
         errors = []
+        if self.loader_errors:
+            for err in self.loader_errors:
+                errors.append(f"Job '{self.name}': {err}")
+
         if not self.keywords:
-            errors.append(f"Job '{self.name}': Danh sách 'keywords' không được để trống.")
+            errors.append(f"Job '{self.name}': Danh sách 'keywords' không được để trống (hoặc file cấu hình từ khóa không có dữ liệu hợp lệ).")
         
         _, sched_err = calculate_next_run(self.schedule)
         if sched_err:
@@ -164,13 +177,14 @@ def load_and_validate_config(config_path: str = DEFAULT_CONFIG_PATH) -> Tuple[Di
     if not isinstance(raw_jobs, dict):
         return {}, ["Key 'jobs' phải là một dictionary chứa các job."]
 
+    config_dir = os.path.dirname(os.path.abspath(config_path))
     jobs = {}
     all_errors = []
     for name, jdata in raw_jobs.items():
         if not isinstance(jdata, dict):
             all_errors.append(f"Job '{name}' cấu hình không đúng định dạng dict.")
             continue
-        job_cfg = JobConfig(name, jdata)
+        job_cfg = JobConfig(name, jdata, config_dir=config_dir)
         errs = job_cfg.validate()
         all_errors.extend(errs)
         jobs[name] = job_cfg
@@ -206,6 +220,40 @@ def save_job_results_to_json(places: List[Place], keyword: str, job_dir: str) ->
     file_path = os.path.join(job_dir, filename)
 
     data = [p.to_dict() for p in places]
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return file_path
+
+
+def save_consolidated_job_results(
+    places: List[Place],
+    job_name: str,
+    job_dir: str,
+    timestamp: Optional[str] = None,
+) -> str:
+    """Gom nhóm toàn bộ địa điểm cào được trong 1 lần chạy job vào 1 file JSON tổng hợp.
+    
+    Tự động khử trùng lặp dựa trên place_id (hoặc url / title).
+    """
+    os.makedirs(job_dir, exist_ok=True)
+    slug = slugify(job_name, separator="_")
+    if not timestamp:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{slug}_{timestamp}.json"
+    file_path = os.path.join(job_dir, filename)
+
+    seen_keys = set()
+    unique_places: List[Place] = []
+    for p in places:
+        key = p.place_id or p.url or (p.title.strip().lower() if p.title else "")
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        unique_places.append(p)
+
+    data = [p.to_dict() for p in unique_places]
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -260,6 +308,7 @@ class SchedulerEngine:
         self.console = console or Console()
         self.jobs: Dict[str, JobConfig] = {}
         self.last_config_mtime: float = 0
+        self.watched_files_mtimes: Dict[str, float] = {}
         self.is_running = False
         self.current_running_job: Optional[str] = None
         self.job_queue: asyncio.Queue = asyncio.Queue()
@@ -268,8 +317,25 @@ class SchedulerEngine:
     def reload_config_if_changed(self) -> bool:
         if not os.path.exists(self.config_path):
             return False
-        mtime = os.path.getmtime(self.config_path)
-        if mtime != self.last_config_mtime:
+
+        cfg_mtime = os.path.getmtime(self.config_path)
+        changed = False
+
+        if cfg_mtime != self.last_config_mtime:
+            changed = True
+        else:
+            # Kiểm tra thay đổi của các file keyword ngoài (CSV, TXT, JSON...)
+            for fpath, old_mtime in self.watched_files_mtimes.items():
+                if os.path.exists(fpath):
+                    if os.path.getmtime(fpath) != old_mtime:
+                        changed = True
+                        break
+                else:
+                    # File ngoài bị xóa
+                    changed = True
+                    break
+
+        if changed or not self.jobs:
             jobs, errors = load_and_validate_config(self.config_path)
             if errors:
                 self.console.print(f"[bold red]⚠️ Lỗi cấu hình {self.config_path}:[/bold red]")
@@ -279,7 +345,16 @@ class SchedulerEngine:
 
             self.jobs = jobs
             self.itravels_settings = GLOBAL_SETTINGS.get("itravels_api") or GLOBAL_SETTINGS.get("itravels", {})
-            self.last_config_mtime = mtime
+            self.last_config_mtime = cfg_mtime
+
+            # Cập nhật danh sách theo dõi mtime của các file từ khóa ngoài
+            new_watched: Dict[str, float] = {}
+            for j in self.jobs.values():
+                for fpath in getattr(j, "watched_files", []):
+                    if os.path.exists(fpath):
+                        new_watched[fpath] = os.path.getmtime(fpath)
+            self.watched_files_mtimes = new_watched
+
             self.console.print(
                 f"[bold green]✔ Đã nạp thành công {len(self.jobs)} jobs từ {self.config_path} (Hot-reload)[/bold green]"
             )
@@ -302,6 +377,7 @@ class SchedulerEngine:
         job_name: str,
         limit_override: Optional[int] = None,
         headed: bool = False,
+        max_keywords_override: Optional[int] = None,
     ) -> bool:
         """Thực thi một job độc lập, bảo đảm bắt lỗi và ghi nhận đầy đủ."""
         if job_name not in self.jobs:
@@ -315,15 +391,25 @@ class SchedulerEngine:
         logger = setup_job_logger(job_name)
         log_file = os.path.join(LOGS_DIR, f"{job_name}.log")
 
+        # Áp dụng giới hạn số từ khóa nếu có (dùng để test nhanh)
+        target_keywords = list(job_cfg.keywords)
+        if max_keywords_override is not None and max_keywords_override > 0:
+            target_keywords = target_keywords[:max_keywords_override]
+
         effective_limit = limit_override if limit_override is not None else job_cfg.limit
         logger.info(f"=== Bắt đầu thực thi job '{job_name}' ===")
         logger.info(f"Mô tả: {job_cfg.description}")
-        logger.info(f"Số lượng keyword: {len(job_cfg.keywords)}, Limit: {effective_limit}, Concurrency: {job_cfg.concurrency}")
+        logger.info(
+            f"Số lượng keyword: {len(target_keywords)} (tổng cấu hình: {len(job_cfg.keywords)}), "
+            f"Limit: {effective_limit}, Concurrency: {job_cfg.concurrency}"
+        )
 
-        run_id = self.db.start_run(job_name, len(job_cfg.keywords), log_file)
+        run_id = self.db.start_run(job_name, len(target_keywords), log_file)
         self.current_running_job = job_name
 
         output_files = []
+        all_collected_places: List[Place] = []
+        run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         total_places = 0
         success_kw = 0
         failed_kw = 0
@@ -343,10 +429,10 @@ class SchedulerEngine:
             await scraper.start()
             logger.info("Trình duyệt khởi động thành công.")
 
-            for idx, keyword in enumerate(job_cfg.keywords, 1):
-                logger.info(f"[{idx}/{len(job_cfg.keywords)}] Bắt đầu cào keyword: '{keyword}'")
+            for idx, keyword in enumerate(target_keywords, 1):
+                logger.info(f"[{idx}/{len(target_keywords)}] Bắt đầu cào keyword: '{keyword}'")
                 self.console.print(
-                    f"[dim]  ↳ [{idx}/{len(job_cfg.keywords)}] Đang cào:[/] [cyan]'{keyword}'[/] "
+                    f"[dim]  ↳ [{idx}/{len(target_keywords)}] Đang cào:[/] [cyan]'{keyword}'[/] "
                     f"[dim](limit: {effective_limit or 'all'})[/]"
                 )
                 try:
@@ -358,15 +444,15 @@ class SchedulerEngine:
                         concurrency=job_cfg.concurrency,
                     )
                     
-                    saved_path = save_job_results_to_json(places, keyword, job_output_dir)
-                    output_files.append(saved_path)
+                    if places:
+                        all_collected_places.extend(places)
                     total_places += len(places)
                     success_kw += 1
                     logger.info(
-                        f"[{idx}/{len(job_cfg.keywords)}] Thành công cào '{keyword}': {len(places)} địa điểm -> {saved_path}"
+                        f"[{idx}/{len(target_keywords)}] Thành công cào '{keyword}': {len(places)} địa điểm"
                     )
                     self.console.print(
-                        f"    [green]✔ Xong '{keyword}':[/green] {len(places)} địa điểm -> [dim]{saved_path}[/dim]"
+                        f"    [green]✔ Xong '{keyword}':[/green] {len(places)} địa điểm"
                     )
                 except Exception as kw_err:
                     failed_kw += 1
@@ -377,7 +463,7 @@ class SchedulerEngine:
                     self.console.print(f"    [red]✖ Lỗi cào '{keyword}':[/red] {kw_err}")
 
         except Exception as job_err:
-            failed_kw += len(job_cfg.keywords) - (success_kw + failed_kw)
+            failed_kw += len(target_keywords) - (success_kw + failed_kw)
             global_err = f"Lỗi toàn cục trong job '{job_name}': {str(job_err)}"
             error_msgs.append(global_err)
             logger.error(global_err)
@@ -394,6 +480,17 @@ class SchedulerEngine:
             self.current_running_job = None
             if job_name in self._queued_job_names:
                 self._queued_job_names.remove(job_name)
+
+            # Gom nhóm toàn bộ kết quả vào 1 file JSON tổng hợp của lần chạy này
+            if all_collected_places:
+                consolidated_path = save_consolidated_job_results(
+                    all_collected_places, job_name, job_output_dir, timestamp=run_timestamp
+                )
+                output_files = [consolidated_path]
+                logger.info(f"Đã lưu file tổng hợp {len(all_collected_places)} địa điểm -> {consolidated_path}")
+                self.console.print(
+                    f"  [bold green]📦 Đã gom nhóm {len(all_collected_places)} địa điểm vào file:[/bold green] [dim]{consolidated_path}[/dim]"
+                )
 
             # Tính toán trạng thái kết thúc
             if failed_kw == 0 and success_kw > 0:
@@ -470,7 +567,7 @@ class SchedulerEngine:
 
             logger.info(
                 f"=== Hoàn thành job '{job_name}': Trạng thái={final_status}, Tổng địa điểm={total_places}, "
-                f"Keywords thành công={success_kw}/{len(job_cfg.keywords)}, Lần chạy kế tiếp={next_run} ==="
+                f"Keywords thành công={success_kw}/{len(target_keywords)}, Lần chạy kế tiếp={next_run} ==="
             )
 
         return final_status == "SUCCESS"
@@ -480,6 +577,7 @@ class SchedulerEngine:
         job_names: List[str],
         limit_override: Optional[int] = None,
         headed: bool = False,
+        max_keywords_override: Optional[int] = None,
     ) -> Dict[str, bool]:
         """Thực thi lần lượt, tuần tự danh sách các job."""
         results = {}
@@ -492,7 +590,12 @@ class SchedulerEngine:
                 f"[bold magenta]═══════════════════════════════════════════════════════════════════[/bold magenta]\n"
                 f"[bold cyan]▶ [{idx}/{total}] Đang thực thi task:[/bold cyan] [bold yellow]{name}[/bold yellow]"
             )
-            success = await self.run_single_job(name, limit_override=limit_override, headed=headed)
+            success = await self.run_single_job(
+                name,
+                limit_override=limit_override,
+                headed=headed,
+                max_keywords_override=max_keywords_override,
+            )
             results[name] = success
             status_text = "[bold green]Thành công ✅[/bold green]" if success else "[bold red]Lỗi hoặc một phần 🔴[/bold red]"
             self.console.print(f"[bold cyan]✔ Kết thúc task {name}:[/bold cyan] {status_text}\n")

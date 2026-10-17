@@ -234,6 +234,11 @@ class GoogleMapsScraper:
                     const cards = document.querySelectorAll('div.Nv2PK');
                     if (cards.length > 0) {
                         for (const c of cards) {
+                            // Bỏ qua các thẻ quảng cáo / được tài trợ (sponsored)
+                            const text = (c.innerText || '').toLowerCase();
+                            if (text.includes('quảng cáo') || text.includes('được tài trợ') || text.includes('sponsored') || c.querySelector('[aria-label*="Quảng cáo"], [aria-label*="Được tài trợ"], [aria-label*="Sponsored"]')) {
+                                continue;
+                            }
                             const a = c.querySelector('a[href*="/maps/place/"]');
                             if (!a || !a.href) continue;
                             let price = null;
