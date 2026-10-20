@@ -14,8 +14,8 @@ class TestKeywordLoader(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_load_place_example_csv(self):
-        csv_path = os.path.abspath("place.example.csv")
-        self.assertTrue(os.path.exists(csv_path), "place.example.csv must exist in repo root")
+        csv_path = os.path.abspath("places.example.csv")
+        self.assertTrue(os.path.exists(csv_path), "places.example.csv must exist in repo root")
 
         keywords = load_keywords_from_file(csv_path)
         self.assertEqual(len(keywords), 78)
@@ -95,7 +95,7 @@ class TestKeywordLoader(unittest.TestCase):
     def test_job_config_with_keywords_file(self):
         from src.scheduler import JobConfig
         data = {
-            "keywords_file": "place.example.csv",
+            "keywords_file": "places.example.csv",
             "limit": 1,
             "schedule": {"cron": "0 4 * * 0"},
         }

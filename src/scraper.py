@@ -5,7 +5,18 @@ import urllib.parse
 from typing import List, Optional, Dict, Any, Callable, Tuple
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
-from src.models import Place, Review, Coordinates, MenuItem, MenuInfo, PricingInfo, PricePartner
+from src.models import (
+    Place,
+    Review,
+    Coordinates,
+    MenuItem,
+    MenuInfo,
+    PricingInfo,
+    PricePartner,
+    parse_place_id_from_url,
+    normalize_place_id,
+    chij_to_hex,
+)
 
 SORT_OPTIONS = {
     "most_relevant": "Phù hợp nhất",
@@ -45,18 +56,6 @@ def parse_coordinates_from_url(url: str) -> Optional[Coordinates]:
     if match_d:
         return Coordinates(latitude=float(match_d.group(1)), longitude=float(match_d.group(2)))
     return None
-
-def parse_place_id_from_url(url: Optional[str]) -> Optional[str]:
-    if not url:
-        return None
-    match = re.search(r'!19s(ChIJ[a-zA-Z0-9_-]+)', url)
-    if match:
-        return match.group(1)
-    match_hex = re.search(r'!1s(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+)', url)
-    if match_hex:
-        return match_hex.group(1)
-    return None
-
 
 def clean_image_url(raw_url: Optional[str]) -> Optional[str]:
     if not raw_url:
@@ -461,8 +460,16 @@ class GoogleMapsScraper:
         if web_el:
             place.website = await web_el.get_attribute("href")
 
-        # Place ID
-        place.place_id = parse_place_id_from_url(page.url) or parse_place_id_from_url(place_url)
+        # Place ID (ưu tiên trích xuất và chuẩn hoá dạng 0x...:0x...)
+        place.place_id = parse_place_id_from_url(page.url) or parse_place_id_from_url(place_url) or place.place_id
+        if not place.place_id:
+            try:
+                canonical_el = await page.query_selector('link[rel="canonical"]')
+                if canonical_el:
+                    canonical_href = await canonical_el.get_attribute("href")
+                    place.place_id = parse_place_id_from_url(canonical_href)
+            except Exception:
+                pass
 
         # Description / Editorial summary
         desc_el = await page.query_selector('div.WeS02d, div.PYvSYb')

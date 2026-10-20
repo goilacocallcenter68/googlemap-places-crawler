@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from src.models import Place
+from src.models import Place, normalize_place_id, parse_place_id_from_url
 from src.scraper import GoogleMapsScraper
 from src.scheduler_db import SchedulerDB, DEFAULT_DB_PATH
 from src.keyword_loader import resolve_job_keywords
@@ -246,6 +246,11 @@ def save_consolidated_job_results(
     seen_keys = set()
     unique_places: List[Place] = []
     for p in places:
+        if p.place_id:
+            p.place_id = normalize_place_id(p.place_id, p.url)
+        elif p.url:
+            p.place_id = parse_place_id_from_url(p.url)
+
         key = p.place_id or p.url or (p.title.strip().lower() if p.title else "")
         if key and key in seen_keys:
             continue

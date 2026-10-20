@@ -7,6 +7,8 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 import requests
 
+from src.models import normalize_place_id, parse_place_id_from_url
+
 DEFAULT_API_KEY = "PcCnUPgiOnZ0wumxG-ZyX2aBLpdlMGC6OecAyfXPEVM"
 DEFAULT_BASE_URL = "https://api.itravels.vn"
 DEFAULT_SITE = "khanh-hoa"
@@ -101,16 +103,26 @@ class ITravelsClient:
             "User-Agent": "GoogleMapsCrawler-Sync/1.0",
         }
 
+        # Chuẩn hoá place_id về dạng hex 0x...:0x... trước khi gửi
+        normalized_items = []
+        for it in items:
+            it_dict = dict(it) if isinstance(it, dict) else it
+            if isinstance(it_dict, dict):
+                norm_id = normalize_place_id(it_dict.get("place_id"), it_dict.get("url"))
+                if norm_id:
+                    it_dict["place_id"] = norm_id
+            normalized_items.append(it_dict)
+
         retries = 0
         while retries <= self.max_retries:
             try:
                 self.log_info(
-                    f"Đang gửi request POST tới {url} (params: {params}, items: {len(items)}, lần thử: {retries + 1})..."
+                    f"Đang gửi request POST tới {url} (params: {params}, items: {len(normalized_items)}, lần thử: {retries + 1})..."
                 )
                 resp = requests.post(
                     url,
                     params=params,
-                    json=items,
+                    json=normalized_items,
                     headers=headers,
                     timeout=60,
                 )
@@ -178,9 +190,19 @@ class ITravelsClient:
         if not places:
             return True, "Không có bản ghi nào để đồng bộ.", {"total": 0, "success": 0}
 
-        total_records = len(places)
+        # Chuẩn hoá place_id cho toàn bộ bản ghi
+        normalized_places = []
+        for p in places:
+            p_dict = dict(p) if isinstance(p, dict) else p
+            if isinstance(p_dict, dict):
+                norm_id = normalize_place_id(p_dict.get("place_id"), p_dict.get("url"))
+                if norm_id:
+                    p_dict["place_id"] = norm_id
+            normalized_places.append(p_dict)
+
+        total_records = len(normalized_places)
         batch_size = self.batch_size
-        batches = [places[i : i + batch_size] for i in range(0, total_records, batch_size)]
+        batches = [normalized_places[i : i + batch_size] for i in range(0, total_records, batch_size)]
 
         self.log_info(
             f"=== Bắt đầu đồng bộ iTravels: {total_records} bản ghi -> chia làm {len(batches)} lô (mỗi lô {batch_size}) ==="
