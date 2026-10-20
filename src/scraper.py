@@ -131,6 +131,21 @@ class GoogleMapsScraper:
             }
         ])
 
+        # Chặn tải ảnh, media, font trên toàn bộ context để tăng tốc tải trang và tiết kiệm RAM/băng thông
+        async def _global_route_filter(route):
+            if route.request.resource_type in ["image", "media", "font"]:
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+            else:
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+
+        await self.context.route("**/*", _global_route_filter)
+
     async def close(self):
         if self.context:
             await self.context.close()
@@ -172,7 +187,10 @@ class GoogleMapsScraper:
                 progress_callback("Đang tìm kiếm trên Google Maps...", 0, 0)
                 
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(3000)
+            try:
+                await page.wait_for_selector('h1, div[role="feed"], span.HlvSq, div.PbZDve', timeout=4000)
+            except Exception:
+                pass
             await self._handle_consent(page)
 
             # Check if this directly navigated to a single place page
@@ -180,33 +198,26 @@ class GoogleMapsScraper:
             feed = await page.query_selector('div[role="feed"]')
 
             if not feed and single_h1:
-                # Wait for Google Maps to finish client-side navigation to /maps/place/ URL
-                for _ in range(12):
-                    if "/maps/place/" in page.url:
-                        break
-                    await page.wait_for_timeout(500)
-
-                # Single place result directly
                 title_text = await single_h1.inner_text()
                 if title_text and "kết quả" not in title_text.lower():
+                    # Chờ URL giải quyết sang /maps/place/ nếu đang redirect
+                    for _ in range(12):
+                        if "/maps/place/" in page.url:
+                            break
+                        await page.wait_for_timeout(250)
+
                     if progress_callback:
                         progress_callback(f"Tìm thấy 1 địa điểm trực tiếp: {title_text}", 1, 1)
 
                     direct_url = page.url
+                    # Trích xuất trực tiếp trên tab hiện tại, tránh reload lại trang tốn thêm 5-10s
+                    place = await self._extract_place_details(page, direct_url, max_reviews=max_reviews, sort_by=sort_by)
+                    if place:
+                        if "/maps/place/" in page.url:
+                            place.url = page.url
+                            place.place_id = parse_place_id_from_url(page.url) or place.place_id
+                        places_data.append(place)
                     await page.close()
-
-                    # Open direct place URL in a fresh place page to allow full tab navigation
-                    place_page = await self.context.new_page()
-                    try:
-                        await place_page.goto(direct_url, wait_until="domcontentloaded", timeout=25000)
-                        await place_page.wait_for_timeout(2000)
-                        await self._handle_consent(place_page)
-                        place = await self._extract_place_details(place_page, direct_url, max_reviews=max_reviews, sort_by=sort_by)
-                        if place:
-                            places_data.append(place)
-                    finally:
-                        if not place_page.is_closed():
-                            await place_page.close()
                     return places_data
 
             if not feed:
@@ -329,23 +340,11 @@ class GoogleMapsScraper:
                         place_page: Optional[Page] = None
                         try:
                             place_page = await self.context.new_page()
-
-                            # Route blocking: block image, media, font to save RAM and network bandwidth
-                            async def _route_filter(route):
-                                if route.request.resource_type in ["image", "media", "font"]:
-                                    try:
-                                        await route.abort()
-                                    except Exception:
-                                        pass
-                                else:
-                                    try:
-                                        await route.continue_()
-                                    except Exception:
-                                        pass
-
-                            await place_page.route("**/*", _route_filter)
                             await place_page.goto(place_url, wait_until="domcontentloaded", timeout=25000)
-                            await place_page.wait_for_timeout(1800)
+                            try:
+                                await place_page.wait_for_selector('h1', timeout=4000)
+                            except Exception:
+                                pass
                             await self._handle_consent(place_page)
                             feed_p = feed_price_map.get(place_url)
                             place = await self._extract_place_details(place_page, place_url, max_reviews=max_reviews, sort_by=sort_by, feed_price=feed_p)
@@ -518,46 +517,59 @@ class GoogleMapsScraper:
 
         return place
 
+    async def _get_available_tabs(self, page: Page) -> List[str]:
+        """Lấy danh sách tên các tab hiện có của địa điểm (chữ thường)."""
+        try:
+            return await page.evaluate(r'''() => {
+                const tabs = document.querySelectorAll('button[role="tab"], div[role="tab"]');
+                return Array.from(tabs).map(t => (t.innerText || t.getAttribute('aria-label') || '').toLowerCase().trim());
+            }''')
+        except Exception:
+            return []
+
     async def _extract_about(self, page: Page) -> Dict[str, List[str]]:
         """Extracts accessibility, services, amenities, payments, etc. from the About tab."""
         about_data: Dict[str, List[str]] = {}
         try:
+            # 0. Kiểm tra tab "Giới thiệu" có tồn tại không trước khi click (tiết kiệm 5-10s nếu không có)
+            tabs = await self._get_available_tabs(page)
+            if not any("giới thiệu" in t or "about" in t for t in tabs):
+                return {}
+
             # 1. Switch to "Giới thiệu" (About) tab
             tab_clicked = False
-            for _ in range(12):
-                tab_locator = page.locator('button[role="tab"]').filter(has_text=re.compile(r'giới thiệu|about', re.I))
-                if await tab_locator.count() > 0:
-                    is_sel = await tab_locator.first.get_attribute("aria-selected")
-                    if is_sel == "true":
-                        tab_clicked = True
-                        break
-                    try:
-                        await tab_locator.first.click(timeout=2000)
-                    except Exception:
-                        await tab_locator.first.evaluate("el => el.click()")
-                    await page.wait_for_timeout(800)
-                    is_sel = await tab_locator.first.get_attribute("aria-selected")
-                    if is_sel == "true":
-                        tab_clicked = True
-                        break
+            tab_locator = page.locator('button[role="tab"]').filter(has_text=re.compile(r'giới thiệu|about', re.I)).first
+            if await tab_locator.count() > 0:
+                is_sel = await tab_locator.get_attribute("aria-selected")
+                if is_sel == "true":
+                    tab_clicked = True
                 else:
-                    tabs = await page.query_selector_all('button[role="tab"]')
-                    for t in tabs:
+                    try:
+                        await tab_locator.click(timeout=1500)
+                    except Exception:
+                        await tab_locator.evaluate("el => el.click()")
+                    await page.wait_for_timeout(400)
+                    tab_clicked = True
+
+            if not tab_clicked:
+                for _ in range(4):
+                    tabs_els = await page.query_selector_all('button[role="tab"]')
+                    for t in tabs_els:
                         comb = f"{await t.get_attribute('aria-label') or ''} {await t.inner_text() or ''}".lower()
                         if 'giới thiệu' in comb or 'about' in comb:
                             try:
                                 await t.click()
                             except Exception:
                                 await t.evaluate("el => el.click()")
-                            await page.wait_for_timeout(800)
+                            await page.wait_for_timeout(400)
                             tab_clicked = True
                             break
                     if tab_clicked:
                         break
-                await page.wait_for_timeout(400)
+                    await page.wait_for_timeout(200)
 
             if tab_clicked:
-                await page.wait_for_timeout(1200)
+                await page.wait_for_timeout(600)
 
                 # Scroll about container down once to ensure all sections render
                 try:
@@ -567,8 +579,9 @@ class GoogleMapsScraper:
                             scroller.scrollTop += 1500;
                         }
                     }''')
-                    await page.wait_for_timeout(500)
+                    await page.wait_for_timeout(300)
                 except Exception:
+                    pass
                     pass
 
                 # Extract sections
@@ -904,23 +917,29 @@ class GoogleMapsScraper:
             # 1. External menu link
             menu_info.link = await self._extract_menu_link(page)
 
-            # 2. Extract dishes and photos directly from official Thực đơn / Menu tab
-            tab_dishes, tab_photos = await self._extract_from_menu_tab(page)
-            if tab_dishes:
-                menu_info.dishes = tab_dishes
-            if tab_photos:
-                menu_info.photos = tab_photos
+            # Kiểm tra nhanh xem tab Thực đơn / Menu có xuất hiện trên giao diện không
+            tabs = await self._get_available_tabs(page)
+            has_menu_tab = any("thực đơn" in t or "menu" in t for t in tabs)
+
+            # 2. Extract dishes and photos directly from official Thực đơn / Menu tab (chỉ khi có tab)
+            if has_menu_tab:
+                tab_dishes, tab_photos = await self._extract_from_menu_tab(page)
+                if tab_dishes:
+                    menu_info.dishes = tab_dishes
+                if tab_photos:
+                    menu_info.photos = tab_photos
 
             # 3. Fallback: if no dishes from menu tab, check overview popular dishes & chips
             if not menu_info.dishes:
                 menu_info.dishes = await self._extract_overview_popular_dishes(page)
 
-            # 4. Fallback for photos: if no photos from menu tab, check Photos tab
-            if not menu_info.photos:
+            # 4. Fallback for photos: chỉ tìm trong Photos tab khi có tab menu hoặc đã tìm thấy món ăn
+            if not menu_info.photos and (has_menu_tab or menu_info.dishes):
                 menu_info.photos = await self._extract_menu_photos(page)
 
             # Switch back to Overview tab so subsequent extractions (About, Reviews) run properly
-            await self._ensure_overview_tab(page)
+            if has_menu_tab:
+                await self._ensure_overview_tab(page)
         except Exception:
             pass
 
@@ -991,11 +1010,11 @@ class GoogleMapsScraper:
         try:
             # Wait for tab with text "Thực đơn" or "Menu" (up to 12 retries)
             tab_clicked = False
-            for _ in range(12):
+            for _ in range(4):
                 menu_tab = page.locator('button[role="tab"]').filter(has_text=re.compile(r'thực đơn|menu', re.I)).first
                 if await menu_tab.count() > 0:
                     try:
-                        await menu_tab.click(timeout=2000)
+                        await menu_tab.click(timeout=1500)
                     except Exception:
                         await menu_tab.evaluate("el => el.click()")
                     tab_clicked = True
@@ -1013,7 +1032,7 @@ class GoogleMapsScraper:
                             break
                     if tab_clicked:
                         break
-                await page.wait_for_timeout(400)
+                await page.wait_for_timeout(250)
 
             if not tab_clicked:
                 return [], []
@@ -1371,7 +1390,7 @@ class GoogleMapsScraper:
 
             # 1. Switch to "Bài đánh giá" tab (Google Maps renders this tab asynchronously)
             tab_clicked = False
-            for _ in range(16):
+            for _ in range(6):
                 tab_locator = page.locator('button[role="tab"]').filter(has_text=re.compile(r'đánh giá|reviews', re.I))
                 if await tab_locator.count() > 0:
                     is_sel = await tab_locator.first.get_attribute("aria-selected")
@@ -1379,10 +1398,10 @@ class GoogleMapsScraper:
                         tab_clicked = True
                         break
                     try:
-                        await tab_locator.first.click(timeout=3000)
+                        await tab_locator.first.click(timeout=1500)
                     except Exception:
                         await tab_locator.first.evaluate("el => el.click()")
-                    await page.wait_for_timeout(800)
+                    await page.wait_for_timeout(300)
                     is_sel = await tab_locator.first.get_attribute("aria-selected")
                     if is_sel == "true":
                         tab_clicked = True
@@ -1396,14 +1415,14 @@ class GoogleMapsScraper:
                                 await t.click()
                             except Exception:
                                 await t.evaluate("el => el.click()")
-                            await page.wait_for_timeout(800)
+                            await page.wait_for_timeout(300)
                             is_sel = await t.get_attribute("aria-selected")
                             if is_sel == "true":
                                 tab_clicked = True
                                 break
                     if tab_clicked:
                         break
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(250)
 
             # Fallback: check for more reviews button or reviews header button
             if not tab_clicked:
@@ -1539,58 +1558,55 @@ class GoogleMapsScraper:
             }''')
             await page.wait_for_timeout(400)
 
-            # 6. Extract review cards with deduplication
-            cards = await page.query_selector_all('div.jftiEf')
-            if target_count < float('inf'):
-                cards = cards[:int(target_count)]
+            # 6. Extract review cards with deduplication (single-shot batch JS evaluation)
+            limit_val = int(target_count) if target_count < float('inf') else 200
+            raw_reviews = await page.evaluate(r'''(limitVal) => {
+                const cards = document.querySelectorAll('div.jftiEf');
+                const results = [];
+                const max = limitVal || cards.length;
+                for (let i = 0; i < cards.length && i < max; i++) {
+                    const card = cards[i];
+                    const authEl = card.querySelector('.d4r55');
+                    const authBtn = card.querySelector('button.al6Kxe, a[href*="contrib"]');
+                    const starEl = card.querySelector('span.kvMYJc');
+                    const dateEl = card.querySelector('span.rsqaWe');
+                    const contentEl = card.querySelector('span.wiI7pd');
+                    const photoEls = card.querySelectorAll('button[style*="background-image"], div[style*="background-image"], button[data-photo-index], div.KtCyie button');
+                    const photos = [];
+                    photoEls.forEach(pe => {
+                        const style = pe.getAttribute('style') || '';
+                        const m = style.match(/url\(['"]?(.*?)['"]?\)/);
+                        if (m && m[1]) photos.push(m[1]);
+                    });
+                    const ownerEl = card.querySelector('div.CDe7pd');
+                    results.push({
+                        author: authEl ? (authEl.innerText || '').trim() : '',
+                        author_url: authBtn ? (authBtn.getAttribute('data-href') || authBtn.getAttribute('href')) : null,
+                        star_aria: starEl ? starEl.getAttribute('aria-label') : null,
+                        publish_date: dateEl ? (dateEl.innerText || '').trim() : null,
+                        content: contentEl ? (contentEl.innerText || '').trim() : '',
+                        photos: photos,
+                        owner_response: ownerEl ? (ownerEl.innerText || '').trim() : null
+                    });
+                }
+                return results;
+            }''', limit_val)
 
             seen_keys = set()
-            for card in cards:
+            for item in raw_reviews:
                 try:
                     r = Review()
-                    # Author
-                    auth_el = await card.query_selector('.d4r55')
-                    if auth_el:
-                        r.author = (await auth_el.inner_text()).strip()
-
-                    # Author link
-                    auth_btn = await card.query_selector('button.al6Kxe, a[href*="contrib"]')
-                    if auth_btn:
-                        r.author_url = await auth_btn.get_attribute('data-href') or await auth_btn.get_attribute('href')
-
-                    # Rating
-                    star_el = await card.query_selector('span.kvMYJc')
-                    if star_el:
-                        star_aria = await star_el.get_attribute('aria-label')
-                        r.rating = parse_rating(star_aria)
-
-                    # Date
-                    date_el = await card.query_selector('span.rsqaWe')
-                    if date_el:
-                        r.publish_date = (await date_el.inner_text()).strip()
-
-                    # Content
-                    content_el = await card.query_selector('span.wiI7pd')
-                    if content_el:
-                        r.content = (await content_el.inner_text()).strip()
-
-                    # Photos in review
-                    r_photos = []
-                    photo_elements = await card.query_selector_all(
-                        'button[style*="background-image"], div[style*="background-image"], button[data-photo-index], div.KtCyie button'
-                    )
-                    for pe in photo_elements:
-                        style = await pe.get_attribute('style')
-                        img_url = clean_image_url(style)
-                        if img_url and 'googleusercontent.com/a-/' not in img_url and 'avatar' not in img_url:
-                            if img_url not in r_photos:
-                                r_photos.append(img_url)
-                    r.review_photos = r_photos
-
-                    # Owner response
-                    owner_el = await card.query_selector('div.CDe7pd')
-                    if owner_el:
-                        r.owner_response = (await owner_el.inner_text()).strip()
+                    r.author = item.get("author", "")
+                    r.author_url = item.get("author_url")
+                    r.rating = parse_rating(item.get("star_aria"))
+                    r.publish_date = item.get("publish_date")
+                    r.content = item.get("content", "")
+                    for raw_url in item.get("photos", []):
+                        cleaned = clean_image_url(raw_url)
+                        if cleaned and 'googleusercontent.com/a-/' not in cleaned and 'avatar' not in cleaned:
+                            if cleaned not in r.review_photos:
+                                r.review_photos.append(cleaned)
+                    r.owner_response = item.get("owner_response")
 
                     if r.author or r.content:
                         dedup_key = (r.author, r.publish_date, r.content[:40] if r.content else '')

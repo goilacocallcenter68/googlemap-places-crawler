@@ -114,6 +114,7 @@ class JobConfig:
         self.limit = data.get("limit", None)
         self.max_reviews = data.get("max_reviews", 100)
         self.concurrency = int(data.get("concurrency", 4))
+        self.keyword_concurrency = int(data.get("keyword_concurrency", 0))
         self.sort = data.get("sort", "most_relevant")
         self.profile_dir = data.get("profile_dir", "browser_profile")
         self.data_dir = data.get("data_dir", "data")
@@ -434,38 +435,67 @@ class SchedulerEngine:
             await scraper.start()
             logger.info("Trình duyệt khởi động thành công.")
 
-            for idx, keyword in enumerate(target_keywords, 1):
-                logger.info(f"[{idx}/{len(target_keywords)}] Bắt đầu cào keyword: '{keyword}'")
-                self.console.print(
-                    f"[dim]  ↳ [{idx}/{len(target_keywords)}] Đang cào:[/] [cyan]'{keyword}'[/] "
-                    f"[dim](limit: {effective_limit or 'all'})[/]"
-                )
-                try:
-                    places = await scraper.crawl_keyword(
-                        keyword,
-                        limit=effective_limit,
-                        max_reviews=0 if str(job_cfg.max_reviews).lower() in ("all", "0") else int(job_cfg.max_reviews),
-                        sort_by=job_cfg.sort,
-                        concurrency=job_cfg.concurrency,
-                    )
-                    
-                    if places:
-                        all_collected_places.extend(places)
-                    total_places += len(places)
-                    success_kw += 1
-                    logger.info(
-                        f"[{idx}/{len(target_keywords)}] Thành công cào '{keyword}': {len(places)} địa điểm"
-                    )
+            # Xác định mức độ song song (concurrency) khi cào danh sách keywords
+            # Nếu effective_limit == 1: mỗi keyword chỉ cần 1 tab, dồn toàn bộ concurrency để cào nhiều keywords cùng lúc!
+            # Nếu effective_limit > 1 hoặc None: chạy min(concurrency // 2, 2) keywords song song
+            kw_concurrency = job_cfg.keyword_concurrency
+            if not kw_concurrency or kw_concurrency <= 0:
+                if effective_limit == 1:
+                    kw_concurrency = max(1, job_cfg.concurrency)
+                else:
+                    kw_concurrency = max(1, min(len(target_keywords), job_cfg.concurrency // 2 or 1))
+
+            kw_semaphore = asyncio.Semaphore(kw_concurrency)
+            kw_lock = asyncio.Lock()
+
+            async def _crawl_single_kw(idx: int, keyword: str):
+                nonlocal total_places, success_kw, failed_kw
+                async with kw_semaphore:
+                    logger.info(f"[{idx}/{len(target_keywords)}] Bắt đầu cào keyword: '{keyword}'")
                     self.console.print(
-                        f"    [green]✔ Xong '{keyword}':[/green] {len(places)} địa điểm"
+                        f"[dim]  ↳ [{idx}/{len(target_keywords)}] Đang cào:[/] [cyan]'{keyword}'[/] "
+                        f"[dim](limit: {effective_limit or 'all'})[/]"
                     )
-                except Exception as kw_err:
-                    failed_kw += 1
-                    err_str = f"Keyword '{keyword}' lỗi: {str(kw_err)}"
-                    error_msgs.append(err_str)
-                    logger.error(err_str)
-                    logger.error(traceback.format_exc())
-                    self.console.print(f"    [red]✖ Lỗi cào '{keyword}':[/red] {kw_err}")
+                    try:
+                        inner_concurrency = 1 if effective_limit == 1 else max(1, job_cfg.concurrency // kw_concurrency)
+                        places = await scraper.crawl_keyword(
+                            keyword,
+                            limit=effective_limit,
+                            max_reviews=0 if str(job_cfg.max_reviews).lower() in ("all", "0") else int(job_cfg.max_reviews),
+                            sort_by=job_cfg.sort,
+                            concurrency=inner_concurrency,
+                        )
+
+                        async with kw_lock:
+                            if places:
+                                all_collected_places.extend(places)
+                            total_places += len(places)
+                            success_kw += 1
+                        logger.info(
+                            f"[{idx}/{len(target_keywords)}] Thành công cào '{keyword}': {len(places)} địa điểm"
+                        )
+                        self.console.print(
+                            f"    [green]✔ Xong [{idx}/{len(target_keywords)}] '{keyword}':[/green] {len(places)} địa điểm"
+                        )
+                    except Exception as kw_err:
+                        async with kw_lock:
+                            failed_kw += 1
+                            err_str = f"Keyword '{keyword}' lỗi: {str(kw_err)}"
+                            error_msgs.append(err_str)
+                        logger.error(err_str)
+                        logger.error(traceback.format_exc())
+                        self.console.print(f"    [red]✖ Lỗi cào [{idx}/{len(target_keywords)}] '{keyword}':[/red] {kw_err}")
+
+            if kw_concurrency > 1 and len(target_keywords) > 1:
+                logger.info(f"Đang cào {len(target_keywords)} keywords song song (tối đa {kw_concurrency} luồng cùng lúc)...")
+                self.console.print(
+                    f"[bold cyan]⚡ Đang cào {len(target_keywords)} keywords song song "
+                    f"([yellow]{kw_concurrency}[/yellow] luồng đồng thời)...[/bold cyan]"
+                )
+                await asyncio.gather(*[_crawl_single_kw(idx, kw) for idx, kw in enumerate(target_keywords, 1)])
+            else:
+                for idx, keyword in enumerate(target_keywords, 1):
+                    await _crawl_single_kw(idx, keyword)
 
         except Exception as job_err:
             failed_kw += len(target_keywords) - (success_kw + failed_kw)
